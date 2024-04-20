@@ -73,11 +73,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 grpc_addr = addr.to_string();
             }
         };
-        if !grpc_addr.starts_with("http") {
-            grpc_addr = format!("http://{}", grpc_addr);
-        }
     }
 
+    if !grpc_addr.starts_with("http") {
+        grpc_addr = format!("http://{}", grpc_addr);
+    }
     let channel = Channel::from_shared(grpc_addr)?.connect().await?;
 
     let token: MetadataValue<_> = "Bearer some-secret-token".parse()?;
