@@ -44,7 +44,7 @@ pub struct Queue {
     pub limit: Option<u64>,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct Config {
     pub node: Option<Node>,
     pub prometheus: Option<Prometheus>,

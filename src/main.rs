@@ -8,14 +8,45 @@ pub mod metrics;
 pub mod server;
 pub mod web;
 
+use clap::{command, Parser};
+use std::path::PathBuf;
+
 use config::Config;
 use server::HsmqServer;
+
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Cli {
+    /// Sets a custom config file
+    #[arg(short, long, value_name = "FILE")]
+    config: Option<PathBuf>,
+}
+
+async fn ctrl_c(graceful: bool) {
+    match tokio::signal::ctrl_c().await {
+        Ok(_) => {
+            if graceful {
+                println!(" Graceful shutdown by CTRL+C");
+            } else {
+                println!(" Force shutdown by CTRL+C");
+            }
+        }
+        Err(_) => {
+            log::error!("Failed to install Ctrl+C handler");
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
+    let cli = Cli::parse();
 
-    let cfg = Config::from_file(std::path::Path::new("hsmq.toml"));
+    let cfg = if let Some(config_path) = cli.config.as_deref() {
+        Config::from_file(config_path)
+    } else {
+        Config::default()
+    };
 
     let task_tracker = tokio_util::task::task_tracker::TaskTracker::new();
 
@@ -34,7 +65,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let grpc_srv = grpc::ServiceV1::new(grpc_addr, task_tracker.clone());
     tasks.spawn(async move {
         grpc_srv.run(hsmq).await;
-        "grpc"
     });
 
     if let Some(ref prometheus) = cfg.prometheus {
@@ -43,7 +73,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             w = w.serve_metrics(prometheus.clone());
             tasks.spawn(async move {
                 w.run().await;
-                "web"
             });
         }
     };
@@ -52,31 +81,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let w = cluster::Cluster::new(cluster.clone(), task_tracker.clone());
         tasks.spawn(async move {
             w.run().await;
-            "cluster"
         });
     };
 
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
+    #[cfg(not(unix))]
+    let shutdown = ctrl_c(true);
 
     #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
+    let shutdown = async {
+        let s = tokio::signal::unix::SignalKind::terminate();
+        match tokio::signal::unix::signal(s) {
+            Ok(mut res) => {
+                tokio::select! {
+                    res = ctrl_c(true) => res,
+                    _ = res.recv() => {
+                        log::info!("Graceful shutdown by signal TERM");
+                    }
+                }
+            }
+            Err(_) => {
+                log::error!("Failed to install signal handler");
+                ctrl_c(true).await;
+            }
+        }
     };
 
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => println!(" Graceful shutdown by CTRL+C"),
-        _ = terminate => log::info!("Graceful shutdown by signal TERM"),
-    };
+    shutdown.await;
     task_tracker.close();
 
     loop {
@@ -86,12 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     break;
                 };
             }
-            _ = async {
-                tokio::signal::ctrl_c()
-                    .await
-                    .expect("failed to install Ctrl+C handler");
-            } => {
-                println!(" Force shutdown by CTRL+C");
+            _ = ctrl_c(false) => {
                 break;
             }
         }
