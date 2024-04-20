@@ -1,0 +1,30 @@
+[package]
+name = "hsmq"
+version = "0.1.0"
+edition = "2021"
+default-run = "hsmq"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+axum = { version = "0.7.5", features = ["ws", "http2"] }
+clap = { version = "4.5.4", features = ["derive"] }
+env_logger = "0.11.3"
+futures = "0.3.30"
+h2 = "0.4.4"
+http = "1.1.0"
+lazy_static = "1.4.0"
+log = "0.4.21"
+prometheus = { version = "0.13.3", features = ["process"] }
+prost = "0.12.4"
+prost-types = "0.12.4"
+serde = { version = "1.0.197", features = ["derive"] }
+tokio = { version = "1.37.0", features = ["macros", "rt-multi-thread", "signal"] }
+tokio-stream = "0.1.15"
+tokio-util = { version = "0.7.10", features = ["rt"] }
+toml = "0.8.12"
+tonic = "0.11.0"
+uuid = { version = "1.8.0", features = ["v4", "v7"] }
+
+[build-dependencies]
+tonic-build = "0.11"

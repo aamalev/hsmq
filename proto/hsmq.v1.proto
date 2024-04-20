@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package hsmq.v1;
+
+import "google/protobuf/any.proto";
+
+message Message {
+    google.protobuf.Any data = 1;
+    string topic = 2;
+    string key = 3;
+    map<string, string> headers = 5;
+}
+
+message PublishResponse {
+    oneof kind {
+        int64 count = 1;
+        string msg_id = 2;
+        Redirect redirect = 3;
+    }
+}
+
+message Redirect {
+    string grpc_uri = 1;
+}
+
+message SubscribeQueueRequest {
+    repeated string queue = 1;
+}
+
+message SubscribeQueue {
+    repeated string queue = 1;
+    bool ack = 2;
+}
+
+message SubscriptionResponse {
+    oneof kind {
+        Message message = 1;
+        Redirect redirect = 2;
+    }
+}
+
+message MessageAck {
+    string msg_id = 1;
+}
+
+message Request {
+    oneof kind {
+        SubscribeQueue subscribe_queue = 1;
+        MessageAck message_ack = 2;
+    }
+}
+
+message Response {
+    oneof kind {
+        Message message = 1;
+        Redirect redirect = 2;
+    }
+}
+
+service HSMQ {
+    rpc Publish (Message) returns (PublishResponse) {}
+    rpc PublishQos0 (stream Message) returns (PublishResponse) {}
+    rpc SubscribeQueue (SubscribeQueueRequest) returns (stream SubscriptionResponse) {}
+    rpc Streaming (stream Request) returns (stream Response) {}
+}
