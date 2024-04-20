@@ -119,21 +119,17 @@ pub struct Queue {
 impl Queue {
     fn new(cfg: config::Queue, task_tracker: TaskTracker) -> Self {
         let (tx, rx) = mpsc::channel(99);
-        task_tracker.spawn(Self::processing(
-            tx.clone(),
-            rx,
-            cfg.name.clone(),
-            task_tracker.clone(),
-        ));
+        task_tracker.spawn(Self::processing(cfg, tx.clone(), rx, task_tracker.clone()));
         Self { tx }
     }
 
     async fn processing(
+        cfg: config::Queue,
         qtx: mpsc::Sender<QueueCommand>,
         mut rx: mpsc::Receiver<QueueCommand>,
-        name: String,
         task_tracker: TaskTracker,
     ) {
+        let name = cfg.name.clone();
         let mut tasks = JoinSet::new();
         let mut consumers = HashSet::new();
         let mut waiters = VecDeque::new();
@@ -141,6 +137,7 @@ impl Queue {
         let m_received = metrics::QUEUE_COUNTER.with_label_values(&[&name, "received"]);
         let m_sent = metrics::QUEUE_COUNTER.with_label_values(&[&name, "sent"]);
         let m_requeue = metrics::QUEUE_COUNTER.with_label_values(&[&name, "requeue"]);
+        let m_drop_limit = metrics::QUEUE_COUNTER.with_label_values(&[&name, "drop-limit"]);
         let m_consumers = metrics::QUEUE_GAUGE.with_label_values(&[&name, "consumers"]);
         let m_messages = metrics::QUEUE_GAUGE.with_label_values(&[&name, "messages"]);
         loop {
@@ -156,6 +153,12 @@ impl Queue {
                         QueueCommand::Msg(msg) => {
                             m_received.inc();
                             messages.push_back(msg);
+                            if let Some(limit) = cfg.limit {
+                                while messages.len() > limit {
+                                    messages.pop_front();
+                                    m_drop_limit.inc();
+                                }
+                            }
                         }
                         QueueCommand::Requeue(msg) => {
                             m_requeue.inc();

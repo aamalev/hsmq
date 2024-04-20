@@ -41,7 +41,7 @@ pub struct Queue {
     #[serde(default)]
     pub topics: Vec<String>,
     #[serde(default)]
-    pub limit: Option<u64>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
