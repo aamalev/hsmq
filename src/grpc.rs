@@ -140,6 +140,12 @@ impl hsmq_server::Hsmq for HsmqServer {
                     server::Response::StartConsume(q) => {
                         queues.insert(q);
                     }
+                    server::Response::StopConsume(q) => {
+                        queues.remove(&q);
+                        if queues.is_empty() {
+                            break;
+                        }
+                    }
                     server::Response::GracefulShutdown(q) => {
                         queues.remove(&q);
                         if queues.is_empty() {
@@ -159,6 +165,12 @@ impl hsmq_server::Hsmq for HsmqServer {
                     server::Response::MessageAck(_) => todo!(),
                     server::Response::StartConsume(q) => {
                         queues.insert(q);
+                    }
+                    server::Response::StopConsume(q) => {
+                        queues.remove(&q);
+                        if queues.is_empty() {
+                            break;
+                        }
                     }
                     server::Response::GracefulShutdown(q) => {
                         queues.remove(&q);
@@ -206,7 +218,6 @@ impl hsmq_server::Hsmq for HsmqServer {
         tokio::spawn(async move {
             let mut queues_sub = HashMap::new();
             while let Some(result) = in_stream.next().await {
-                log::error!("Streaming req {:?}", &result);
                 match result {
                     Ok(request) => match request.kind {
                         Some(pb::request::Kind::SubscribeQueue(pb::SubscribeQueueRequest {
@@ -228,10 +239,9 @@ impl hsmq_server::Hsmq for HsmqServer {
                         None => break,
                     },
                     Err(err) => {
-                        for (queue_name, qtx) in queues_sub.iter() {
-                            qtx.send(QueueCommand::ConsumeStop(consumer.clone())).await;
-                            tx.send(server::Response::GracefulShutdown(queue_name.clone())).await;
-                        };
+                        for qtx in queues_sub.into_values() {
+                            let _ = qtx.send(QueueCommand::ConsumeStop(consumer.clone())).await.is_ok();
+                        }
                         log::error!("Client error {:?}", err);
                         break;
                     }
@@ -243,16 +253,17 @@ impl hsmq_server::Hsmq for HsmqServer {
         let m_consume_err = GRPC_COUNTER.with_label_values(&["consume", "err"]);
         let m_unacked = GRPC_GAUGE.with_label_values(&["unacked"]);
         tokio::spawn(async move {
-            log::error!("Streaming start");
             let mut unacked = HashMap::new();
             let mut queues = HashSet::new();
             while let Some(resp) = server_rx.recv().await {
-                log::error!("Streaming server resp {:?}", &resp);
                 match resp {
                     server::Response::Message(qmsg) => {
                         let id = uuid::Uuid::now_v7().to_string();
                         let message = Some(qmsg.message_clone());
-                        let msg = MessageWithId{message, id: id.clone()};
+                        let msg = MessageWithId {
+                            message,
+                            id: id.clone(),
+                        };
                         unacked.insert(id.clone(), qmsg);
 
                         let resp = pb::Response {
@@ -278,6 +289,16 @@ impl hsmq_server::Hsmq for HsmqServer {
                     server::Response::StartConsume(q) => {
                         queues.insert(q);
                     }
+                    server::Response::StopConsume(q) => {
+                        queues.remove(&q);
+                        if queues.is_empty() {
+                            for qmsg in unacked.into_values() {
+                                qmsg.requeue().await;
+                                m_unacked.dec();
+                            }
+                            return;
+                        }
+                    }
                     server::Response::GracefulShutdown(q) => {
                         queues.remove(&q);
                         if queues.is_empty() {
@@ -287,7 +308,6 @@ impl hsmq_server::Hsmq for HsmqServer {
                     }
                 }
             }
-            log::info!("Subscriber disconnect");
             while let Some(resp) = server_rx.recv().await {
                 match resp {
                     server::Response::Message(qmsg) => {
@@ -297,6 +317,12 @@ impl hsmq_server::Hsmq for HsmqServer {
                     server::Response::MessageAck(_) => {}
                     server::Response::StartConsume(q) => {
                         queues.insert(q);
+                    }
+                    server::Response::StopConsume(q) => {
+                        queues.remove(&q);
+                        if queues.is_empty() {
+                            break;
+                        }
                     }
                     server::Response::GracefulShutdown(q) => {
                         queues.remove(&q);

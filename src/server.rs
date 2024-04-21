@@ -29,6 +29,7 @@ pub enum Response {
     Message(QueueMessage),
     MessageAck(String),
     StartConsume(String),
+    StopConsume(String),
     GracefulShutdown(String),
 }
 
@@ -175,6 +176,7 @@ impl Queue {
                         QueueCommand::ConsumeStop(consumer) => {
                             m_consumers.dec();
                             consumers.remove(&consumer.id);
+                            let _ = consumer.q.send(Response::StopConsume(name.clone())).await.is_ok();
                         }
                         QueueCommand::GracefulShutdown => log::error!("unreachable"),
                     };
