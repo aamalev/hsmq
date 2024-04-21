@@ -204,6 +204,7 @@ impl hsmq_server::Hsmq for HsmqServer {
 
         let gconsumer = consumer.clone();
         tokio::spawn(async move {
+            let mut queues_sub = HashMap::new();
             while let Some(result) = in_stream.next().await {
                 log::error!("Streaming req {:?}", &result);
                 match result {
@@ -216,6 +217,7 @@ impl hsmq_server::Hsmq for HsmqServer {
                                     let qtx = queue.tx.clone();
                                     let cmd = QueueCommand::ConsumeStart(consumer.clone());
                                     qtx.send(cmd).await.unwrap();
+                                    queues_sub.insert(queue_name.clone(), qtx);
                                 }
                             }
                         }
@@ -226,12 +228,12 @@ impl hsmq_server::Hsmq for HsmqServer {
                         None => break,
                     },
                     Err(err) => {
-                        if let Some(io_err) = match_for_io_error(&err) {
-                            if io_err.kind() == ErrorKind::BrokenPipe {
-                                log::error!("Client disconnected: broken pipe");
-                                break;
-                            }
-                        }
+                        for (queue_name, qtx) in queues_sub.iter() {
+                            qtx.send(QueueCommand::ConsumeStop(consumer.clone())).await;
+                            tx.send(server::Response::GracefulShutdown(queue_name.clone())).await;
+                        };
+                        log::error!("Client error {:?}", err);
+                        break;
                     }
                 }
             }
