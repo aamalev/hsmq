@@ -2,6 +2,7 @@ use http::uri::Uri;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::SystemTime;
+use tokio::sync::mpsc;
 
 pub mod pb {
     tonic::include_proto!("hsmq.v1");
@@ -48,6 +49,21 @@ enum Command {
         #[command()]
         data: String,
     },
+    /// Subscribe to queue
+    SubscribeQueue {
+        /// Queues
+        #[command()]
+        queues: Vec<String>,
+    },
+    /// Streaming mode
+    Streaming {
+        #[command(subcommand)]
+        command: StreaminCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum StreaminCommand {
     /// Subscribe to queue
     SubscribeQueue {
         /// Queues
@@ -146,6 +162,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Command::Streaming { command } => match command {
+            StreaminCommand::SubscribeQueue { queues } => {
+                let (tx, rx) = mpsc::channel(1);
+                let cmd = SubscribeQueueRequest { queue: queues };
+                let kind = Some(pb::request::Kind::SubscribeQueue(cmd));
+                let req = pb::Request { kind };
+                tx.send(req).await.unwrap();
+                let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+                let mut stream = client.streaming(stream).await?.into_inner();
+
+                while let Some(item) = stream.next().await {
+                    match item?.kind {
+                        Some(pb::response::Kind::Message(msg)) => {
+                            let cmd = pb::MessageAck { msg_id: msg.id };
+                            let kind = Some(pb::request::Kind::MessageAck(cmd));
+                            let req = pb::Request { kind };
+                            tx.send(req).await.unwrap();
+                            log::info!("Received: {:?}", utils::repr(&msg.message.unwrap()));
+                        }
+                        Some(pb::response::Kind::Redirect(uri)) => {
+                            log::info!("Redirect to: {:?}", uri);
+                        }
+                        None => (),
+                    }
+                }
+            }
+        },
     }
 
     Ok(())

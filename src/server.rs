@@ -24,9 +24,12 @@ impl Envelop {
     }
 }
 
+#[derive(Debug)]
 pub enum Response {
     Message(QueueMessage),
+    MessageAck(String),
     StartConsume(String),
+    StopConsume(String),
     GracefulShutdown(String),
 }
 
@@ -112,6 +115,7 @@ pub enum QueueCommand {
     GracefulShutdown,
 }
 
+#[derive(Clone)]
 pub struct Queue {
     pub tx: mpsc::Sender<QueueCommand>,
 }
@@ -159,10 +163,12 @@ impl Queue {
                                     m_drop_limit.inc();
                                 }
                             }
+                            m_messages.set(messages.len() as f64);
                         }
                         QueueCommand::Requeue(msg) => {
                             m_requeue.inc();
                             messages.push_front(msg);
+                            m_messages.set(messages.len() as f64);
                         }
                         QueueCommand::ConsumeStart(consumer) => {
                             consumers.insert(consumer.id);
@@ -172,6 +178,7 @@ impl Queue {
                         QueueCommand::ConsumeStop(consumer) => {
                             m_consumers.dec();
                             consumers.remove(&consumer.id);
+                            let _ = consumer.q.send(Response::StopConsume(name.clone())).await.is_ok();
                         }
                         QueueCommand::GracefulShutdown => log::error!("unreachable"),
                     };

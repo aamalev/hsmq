@@ -27,11 +27,6 @@ message SubscribeQueueRequest {
     repeated string queue = 1;
 }
 
-message SubscribeQueue {
-    repeated string queue = 1;
-    bool ack = 2;
-}
-
 message SubscriptionResponse {
     oneof kind {
         Message message = 1;
@@ -39,20 +34,30 @@ message SubscriptionResponse {
     }
 }
 
+message MessageWithId {
+    Message message = 1;
+    string id = 2;
+}
+
 message MessageAck {
+    string msg_id = 1;
+}
+
+message MessageRequeue {
     string msg_id = 1;
 }
 
 message Request {
     oneof kind {
-        SubscribeQueue subscribe_queue = 1;
+        SubscribeQueueRequest subscribe_queue = 1;
         MessageAck message_ack = 2;
+        MessageRequeue message_requeue = 3;
     }
 }
 
 message Response {
     oneof kind {
-        Message message = 1;
+        MessageWithId message = 1;
         Redirect redirect = 2;
     }
 }
