@@ -20,7 +20,7 @@ Horizontal Scalable Message Queue Broker
     - [x] Graceful serve consumers on shutdown
     - [x] Metrics
     - [x] Limit
-    - [ ] Ack
+    - [x] Ack
     - [ ] TTL for messages
     - [ ] Dynamic queue with ttl
 - [x] Auth
