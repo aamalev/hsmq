@@ -238,11 +238,10 @@ impl hsmq_server::Hsmq for HsmqServer {
                         Some(k) => log::error!("Unexpected for streaming kind {:?}", k),
                         None => break,
                     },
-                    Err(err) => {
+                    Err(_) => {
                         for qtx in queues_sub.into_values() {
                             let _ = qtx.send(QueueCommand::ConsumeStop(consumer.clone())).await.is_ok();
                         }
-                        log::error!("Client error {:?}", err);
                         break;
                     }
                 }
@@ -250,7 +249,7 @@ impl hsmq_server::Hsmq for HsmqServer {
         });
 
         let m_consume_ok = GRPC_COUNTER.with_label_values(&["consume", "ok"]);
-        let m_consume_err = GRPC_COUNTER.with_label_values(&["consume", "err"]);
+        let m_consume_err = GRPC_COUNTER.with_label_values(&["consume", "error"]);
         let m_unacked = GRPC_GAUGE.with_label_values(&["unacked"]);
         tokio::spawn(async move {
             let mut unacked = HashMap::new();
