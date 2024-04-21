@@ -24,8 +24,10 @@ impl Envelop {
     }
 }
 
+#[derive(Debug)]
 pub enum Response {
     Message(QueueMessage),
+    MessageAck(String),
     StartConsume(String),
     GracefulShutdown(String),
 }
@@ -112,6 +114,7 @@ pub enum QueueCommand {
     GracefulShutdown,
 }
 
+#[derive(Clone)]
 pub struct Queue {
     pub tx: mpsc::Sender<QueueCommand>,
 }
