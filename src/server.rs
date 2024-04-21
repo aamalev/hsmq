@@ -163,10 +163,12 @@ impl Queue {
                                     m_drop_limit.inc();
                                 }
                             }
+                            m_messages.set(messages.len() as f64);
                         }
                         QueueCommand::Requeue(msg) => {
                             m_requeue.inc();
                             messages.push_front(msg);
+                            m_messages.set(messages.len() as f64);
                         }
                         QueueCommand::ConsumeStart(consumer) => {
                             consumers.insert(consumer.id);
