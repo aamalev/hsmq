@@ -1,26 +1,30 @@
-use crate::metrics::{GRPC_COUNTER, GRPC_GAUGE};
+use crate::errors::GenericError;
+use crate::metrics::GRPC_COUNTER;
 use crate::pb::{
     self, hsmq_server, publish_response, subscription_response, Message, MessageWithId,
     PublishResponse, SubscribeQueueRequest, SubscriptionResponse,
 };
-use crate::server::{self, Consumer, Envelop, HsmqServer, QueueCommand};
-use std::collections::{HashMap, HashSet};
+use crate::server::{self, Consumer, Envelop, HsmqServer, Queue, QueueCommand};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::{error::Error, io::ErrorKind};
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tokio_util::task::task_tracker::TaskTracker;
+use tonic::Streaming;
 use tonic::{metadata::MetadataValue, transport::Server as TonicServer, Request, Response, Status};
+use uuid::Uuid;
 
 type HsmqResult<T> = Result<Response<T>, Status>;
 
-pub struct ServiceV1 {
+pub struct GrpcService {
     addr: SocketAddr,
     task_tracker: TaskTracker,
 }
 
-impl ServiceV1 {
+impl GrpcService {
     pub fn new(addr: SocketAddr, task_tracker: TaskTracker) -> Self {
         Self { addr, task_tracker }
     }
@@ -34,6 +38,104 @@ impl ServiceV1 {
             .await
             .unwrap();
         log::info!("Stopped");
+    }
+}
+
+struct GrpcConsumer<T> {
+    id: uuid::Uuid,
+    out_tx: mpsc::Sender<Result<T, Status>>,
+    in_tx: mpsc::Sender<server::Response>,
+    q: Queue,
+    ack: bool,
+}
+
+impl<T> GrpcConsumer<T> {
+    fn new(
+        id: Uuid,
+        out_tx: mpsc::Sender<Result<T, Status>>,
+        in_tx: mpsc::Sender<server::Response>,
+        q: Queue,
+        ack: bool,
+    ) -> Self {
+        Self {
+            id,
+            out_tx,
+            in_tx,
+            q,
+            ack,
+        }
+    }
+    fn new_box(
+        id: Uuid,
+        out_tx: mpsc::Sender<Result<T, Status>>,
+        in_tx: mpsc::Sender<server::Response>,
+        q: Queue,
+        ack: bool,
+    ) -> Box<Self> {
+        Box::new(Self::new(id, out_tx, in_tx, q, ack))
+    }
+}
+
+#[tonic::async_trait]
+impl Consumer for GrpcConsumer<pb::SubscriptionResponse> {
+    fn get_id(&self) -> uuid::Uuid {
+        self.id
+    }
+    fn with_ack(&self) -> bool {
+        self.ack
+    }
+    async fn send_id(&self, _msg: Arc<Envelop>, _id: String) -> Result<(), GenericError> {
+        Ok(())
+    }
+    async fn send(&self, msg: Arc<Envelop>) -> Result<(), GenericError> {
+        let msg = msg.message.clone();
+        let resp = pb::SubscriptionResponse {
+            kind: Some(subscription_response::Kind::Message(msg)),
+        };
+        self.out_tx.send(Result::<_, Status>::Ok(resp)).await?;
+        Ok(())
+    }
+    async fn send_resp(&self, resp: server::Response) -> Result<(), GenericError> {
+        self.in_tx.send(resp).await?;
+        Ok(())
+    }
+    async fn stop(&self) {
+        let queue_name = self.q.name.clone();
+        let _ = self
+            .send_resp(server::Response::StopConsume(queue_name))
+            .await;
+    }
+}
+
+#[tonic::async_trait]
+impl Consumer for GrpcConsumer<pb::Response> {
+    fn get_id(&self) -> uuid::Uuid {
+        self.id
+    }
+    fn with_ack(&self) -> bool {
+        self.ack
+    }
+    async fn send(&self, _msg: Arc<Envelop>) -> Result<(), GenericError> {
+        Ok(())
+    }
+    async fn send_id(&self, msg: Arc<Envelop>, id: String) -> Result<(), GenericError> {
+        let message = Some(msg.message.clone());
+        let msg = MessageWithId { message, id };
+        let resp = pb::Response {
+            kind: Some(pb::response::Kind::Message(msg)),
+        };
+        self.out_tx.send(Result::<_, Status>::Ok(resp)).await?;
+        Ok(())
+    }
+    async fn send_resp(&self, resp: server::Response) -> Result<(), GenericError> {
+        self.in_tx.send(resp).await?;
+        Ok(())
+    }
+    async fn stop(&self) {
+        let queue_name = self.q.name.clone();
+        let _ = self
+            .send_resp(server::Response::StopConsume(queue_name))
+            .await;
     }
 }
 
@@ -106,7 +208,7 @@ impl hsmq_server::Hsmq for HsmqServer {
         req: Request<SubscribeQueueRequest>,
     ) -> HsmqResult<Self::SubscribeQueueStream> {
         let (response_tx, response_rx) = mpsc::channel(1);
-        let (server_tx, mut server_rx) = mpsc::channel::<server::Response>(1);
+        let (server_tx, _) = mpsc::channel::<server::Response>(1);
 
         log::info!(
             "Subscribe queue {:?} {:?}",
@@ -114,82 +216,21 @@ impl hsmq_server::Hsmq for HsmqServer {
             req.local_addr()
         );
         let sqr = req.into_inner();
-        let consumer = Consumer::new(server_tx);
+        let consumer_id = Uuid::now_v7();
 
-        let gconsumer = consumer.clone();
-        tokio::spawn(async move {
-            let mut queues = HashSet::new();
-            while let Some(resp) = server_rx.recv().await {
-                match resp {
-                    server::Response::Message(qmsg) => {
-                        let msg: Message = qmsg.message_clone();
-                        let resp = SubscriptionResponse {
-                            kind: Some(subscription_response::Kind::Message(msg)),
-                        };
-                        match response_tx.send(Result::<_, Status>::Ok(resp)).await {
-                            Ok(_) => {
-                                GRPC_COUNTER.with_label_values(&["consume", "ok"]).inc();
-                            }
-                            Err(_item) => {
-                                qmsg.requeue().await;
-                                break;
-                            }
-                        }
-                    }
-                    server::Response::MessageAck(_) => todo!(),
-                    server::Response::StartConsume(q) => {
-                        queues.insert(q);
-                    }
-                    server::Response::StopConsume(q) => {
-                        queues.remove(&q);
-                        if queues.is_empty() {
-                            break;
-                        }
-                    }
-                    server::Response::GracefulShutdown(q) => {
-                        queues.remove(&q);
-                        if queues.is_empty() {
-                            drop(response_tx);
-                            break;
-                        }
-                    }
-                }
-            }
-            log::info!("Subscriber disconnect");
-            while let Some(resp) = server_rx.recv().await {
-                match resp {
-                    server::Response::Message(qmsg) => {
-                        qmsg.stop_consume(gconsumer.clone()).await;
-                        qmsg.requeue().await;
-                    }
-                    server::Response::MessageAck(_) => todo!(),
-                    server::Response::StartConsume(q) => {
-                        queues.insert(q);
-                    }
-                    server::Response::StopConsume(q) => {
-                        queues.remove(&q);
-                        if queues.is_empty() {
-                            break;
-                        }
-                    }
-                    server::Response::GracefulShutdown(q) => {
-                        queues.remove(&q);
-                        if queues.is_empty() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
         for queue_name in sqr.queue.iter() {
             if let Some(queue) = self.queues.get(queue_name) {
-                let qtx = queue.tx.clone();
-                let cmd = QueueCommand::ConsumeStart(consumer.clone());
-                match qtx.send(cmd).await {
+                let consumer = GrpcConsumer::new_box(
+                    consumer_id,
+                    response_tx.clone(),
+                    server_tx.clone(),
+                    queue.clone(),
+                    false,
+                );
+                let cmd = QueueCommand::ConsumeStart(consumer);
+                match queue.send(cmd).await {
                     Ok(_) => {}
-                    Err(e) => {
-                        log::error!("Consume start error {:?}", e);
-                    }
+                    Err(e) => log::error!("Consume start error {:?}", e),
                 }
             }
         }
@@ -206,137 +247,130 @@ impl hsmq_server::Hsmq for HsmqServer {
         &self,
         request: tonic::Request<tonic::Streaming<pb::Request>>,
     ) -> HsmqResult<Self::StreamingStream> {
-        let (response_tx, response_rx) = mpsc::channel(1);
-        let mut in_stream = request.into_inner();
-        let (server_tx, mut server_rx) = mpsc::channel::<server::Response>(1);
+        let (response_tx, response_rx) = mpsc::channel::<Result<pb::Response, Status>>(1);
+        let in_stream = request.into_inner();
 
-        let tx = server_tx.clone();
-        let consumer = Consumer::new(server_tx);
-        let queues = self.queues.clone();
-
-        let gconsumer = consumer.clone();
-        tokio::spawn(async move {
-            let mut queues_sub = HashMap::new();
-            while let Some(result) = in_stream.next().await {
-                match result {
-                    Ok(request) => match request.kind {
-                        Some(pb::request::Kind::SubscribeQueue(pb::SubscribeQueueRequest {
-                            queue,
-                        })) => {
-                            for queue_name in queue.iter() {
-                                if let Some(queue) = queues.get(queue_name) {
-                                    let qtx = queue.tx.clone();
-                                    let cmd = QueueCommand::ConsumeStart(consumer.clone());
-                                    qtx.send(cmd).await.unwrap();
-                                    queues_sub.insert(queue_name.clone(), qtx);
-                                }
-                            }
-                        }
-                        Some(pb::request::Kind::MessageAck(pb::MessageAck { msg_id })) => {
-                            tx.send(server::Response::MessageAck(msg_id)).await.unwrap();
-                        }
-                        Some(k) => log::error!("Unexpected for streaming kind {:?}", k),
-                        None => break,
-                    },
-                    Err(_) => {
-                        for qtx in queues_sub.into_values() {
-                            let _ = qtx.send(QueueCommand::ConsumeStop(consumer.clone())).await.is_ok();
-                        }
-                        break;
-                    }
-                }
-            }
-        });
-
-        let m_consume_ok = GRPC_COUNTER.with_label_values(&["consume", "ok"]);
-        let m_consume_err = GRPC_COUNTER.with_label_values(&["consume", "error"]);
-        let m_unacked = GRPC_GAUGE.with_label_values(&["unacked"]);
-        tokio::spawn(async move {
-            let mut unacked = HashMap::new();
-            let mut queues = HashSet::new();
-            while let Some(resp) = server_rx.recv().await {
-                match resp {
-                    server::Response::Message(qmsg) => {
-                        let id = uuid::Uuid::now_v7().to_string();
-                        let message = Some(qmsg.message_clone());
-                        let msg = MessageWithId {
-                            message,
-                            id: id.clone(),
-                        };
-                        unacked.insert(id.clone(), qmsg);
-
-                        let resp = pb::Response {
-                            kind: Some(pb::response::Kind::Message(msg)),
-                        };
-                        match response_tx.send(Result::<_, Status>::Ok(resp)).await {
-                            Ok(_) => {
-                                m_consume_ok.inc();
-                                m_unacked.inc();
-                            }
-                            Err(_item) => {
-                                m_consume_err.inc();
-                                let qmsg = unacked.remove(&id).unwrap();
-                                qmsg.requeue().await;
-                                break;
-                            }
-                        }
-                    }
-                    server::Response::MessageAck(msg_id) => {
-                        unacked.remove(&msg_id);
-                        m_unacked.dec();
-                    }
-                    server::Response::StartConsume(q) => {
-                        queues.insert(q);
-                    }
-                    server::Response::StopConsume(q) => {
-                        queues.remove(&q);
-                        if queues.is_empty() {
-                            for qmsg in unacked.into_values() {
-                                qmsg.requeue().await;
-                                m_unacked.dec();
-                            }
-                            return;
-                        }
-                    }
-                    server::Response::GracefulShutdown(q) => {
-                        queues.remove(&q);
-                        if queues.is_empty() {
-                            drop(response_tx);
-                            break;
-                        }
-                    }
-                }
-            }
-            while let Some(resp) = server_rx.recv().await {
-                match resp {
-                    server::Response::Message(qmsg) => {
-                        qmsg.stop_consume(gconsumer.clone()).await;
-                        qmsg.requeue().await;
-                    }
-                    server::Response::MessageAck(_) => {}
-                    server::Response::StartConsume(q) => {
-                        queues.insert(q);
-                    }
-                    server::Response::StopConsume(q) => {
-                        queues.remove(&q);
-                        if queues.is_empty() {
-                            break;
-                        }
-                    }
-                    server::Response::GracefulShutdown(q) => {
-                        queues.remove(&q);
-                        if queues.is_empty() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
+        GrpcStreaming::spawn(in_stream, response_tx, self.queues.clone());
 
         let output_stream = ReceiverStream::new(response_rx);
         Ok(Response::new(
             Box::pin(output_stream) as Self::StreamingStream
         ))
+    }
+}
+
+struct GrpcStreaming {
+    consumer_id: Uuid,
+    in_stream: Streaming<pb::Request>,
+    out_tx: mpsc::Sender<Result<pb::Response, Status>>,
+    subs: HashMap<String, server::Queue>,
+    queues: HashMap<String, Queue>,
+    server_tx: mpsc::Sender<server::Response>,
+    server_rx: mpsc::Receiver<server::Response>,
+}
+
+impl GrpcStreaming {
+    fn spawn(
+        in_stream: Streaming<pb::Request>,
+        out_tx: mpsc::Sender<Result<pb::Response, Status>>,
+        queues: HashMap<String, Queue>,
+    ) {
+        let (server_tx, server_rx) = mpsc::channel::<server::Response>(1);
+
+        let subs = HashMap::new();
+
+        let consumer_id = Uuid::now_v7();
+
+        let s = Self {
+            consumer_id,
+            out_tx,
+            in_stream,
+            subs,
+            queues,
+            server_tx,
+            server_rx,
+        };
+
+        tokio::spawn(s.run_loop());
+    }
+    async fn run_loop(mut self) {
+        loop {
+            tokio::select! {
+                Some(result) = self.in_stream.next() => {
+                    match result {
+                        Ok(request) => {
+                            if let Some(kind) = request.kind {
+                                if let Err(e) = self.req_kind(kind).await {
+                                    log::error!("Error kind of request {:?}", e);
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            self.consume_stop().await;
+                            break;
+                        }
+                    }
+                }
+                Some(result) = self.server_rx.recv() => {
+                    match result {
+                        server::Response::StartConsume(queue_name) => {
+                            if !self.subs.contains_key(&queue_name) {
+                                log::error!("Start consume unknown queue {}", queue_name);
+                            }
+                        }
+                        server::Response::StopConsume(queue_name) => {
+                            self.subs.remove(&queue_name);
+                        }
+                        server::Response::GracefulShutdown(queue_name) => {
+                            self.subs.remove(&queue_name);
+                            if self.subs.is_empty() {
+                                return;
+                            }
+                        }
+                    };
+                }
+            }
+        }
+    }
+
+    async fn consume_stop(&mut self) {
+        for queue in self.subs.values() {
+            let _ = queue
+                .send(QueueCommand::ConsumeStop(self.consumer_id))
+                .await
+                .is_ok();
+        }
+    }
+
+    async fn req_kind(&mut self, kind: pb::request::Kind) -> Result<(), GenericError> {
+        match kind {
+            pb::request::Kind::SubscribeQueue(pb::SubscribeQueueRequest { queue }) => {
+                for queue_name in queue.iter() {
+                    if let Some(queue) = self.queues.get(queue_name) {
+                        let consumer = GrpcConsumer::new_box(
+                            self.consumer_id,
+                            self.out_tx.clone(),
+                            self.server_tx.clone(),
+                            queue.clone(),
+                            true,
+                        );
+                        let cmd = QueueCommand::ConsumeStart(consumer);
+                        queue.send(cmd).await?;
+                        self.subs.insert(queue_name.clone(), queue.clone());
+                    }
+                }
+            }
+            pb::request::Kind::MessageAck(pb::MessageAck { msg_id }) => {
+                for queue in self.subs.values() {
+                    let cmd = QueueCommand::MsgAck(msg_id.clone());
+                    if let Err(e) = queue.send(cmd).await {
+                        log::error!("Unexpected queue error {:?}", e);
+                    };
+                }
+            }
+            k => log::error!("Unexpected for streaming kind {:?}", k),
+        };
+        Ok(())
     }
 }
 

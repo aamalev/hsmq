@@ -1,12 +1,16 @@
 use crate::config::{self, Config};
+use crate::errors::GenericError;
 use crate::metrics;
 use crate::pb::Message;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinSet;
+use tokio_stream::StreamExt;
 use tokio_util::task::task_tracker::TaskTracker;
+use tokio_util::time::delay_queue::DelayQueue;
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -26,8 +30,6 @@ impl Envelop {
 
 #[derive(Debug)]
 pub enum Response {
-    Message(QueueMessage),
-    MessageAck(String),
     StartConsume(String),
     StopConsume(String),
     GracefulShutdown(String),
@@ -70,85 +72,77 @@ impl Subscription {
     }
 }
 
-#[derive(Debug)]
-pub struct QueueMessage {
-    message: Arc<Envelop>,
-    queue: mpsc::Sender<QueueCommand>,
+enum ConsumerSendResult {
+    Consumer(Arc<GenericConsumer>),
+    Requeue(Arc<Envelop>),
+    RequeueAck(Arc<Envelop>, String),
+    GracefulShutdown,
 }
 
-impl QueueMessage {
-    pub async fn requeue(&self) {
-        let m = QueueCommand::Requeue(self.message.clone());
-        self.queue.send(m).await.unwrap();
-    }
-
-    pub fn message_clone(&self) -> Message {
-        self.message.message.clone()
-    }
-
-    pub async fn stop_consume(&self, consumer: Consumer) {
-        let cmd = QueueCommand::ConsumeStop(consumer);
-        self.queue.send(cmd).await.unwrap();
-    }
+#[tonic::async_trait]
+pub trait Consumer {
+    fn get_id(&self) -> Uuid;
+    fn with_ack(&self) -> bool;
+    async fn send(&self, msg: Arc<Envelop>) -> Result<(), GenericError>;
+    async fn send_id(&self, msg: Arc<Envelop>, id: String) -> Result<(), GenericError>;
+    async fn send_resp(&self, resp: Response) -> Result<(), GenericError>;
+    async fn stop(&self);
 }
 
-#[derive(Clone)]
-pub struct Consumer {
-    id: Uuid,
-    q: mpsc::Sender<Response>,
-}
-
-impl Consumer {
-    pub fn new(q: mpsc::Sender<Response>) -> Self {
-        Self {
-            id: Uuid::now_v7(),
-            q,
-        }
-    }
-}
+pub type GenericFuture<T> = Pin<Box<(dyn std::future::Future<Output = T> + Send + 'static)>>;
+pub type GenericConsumer = Box<dyn Consumer + Send + Sync + 'static>;
 
 pub enum QueueCommand {
     Msg(Arc<Envelop>),
+    MsgAck(String),
     Requeue(Arc<Envelop>),
-    ConsumeStart(Consumer),
-    ConsumeStop(Consumer),
-    GracefulShutdown,
+    ConsumeStart(GenericConsumer),
+    ConsumeStop(Uuid),
 }
 
 #[derive(Clone)]
 pub struct Queue {
-    pub tx: mpsc::Sender<QueueCommand>,
+    pub name: String,
+    tx: mpsc::Sender<QueueCommand>,
 }
 
 impl Queue {
     fn new(cfg: config::Queue, task_tracker: TaskTracker) -> Self {
         let (tx, rx) = mpsc::channel(99);
-        task_tracker.spawn(Self::processing(cfg, tx.clone(), rx, task_tracker.clone()));
-        Self { tx }
+        let name = cfg.name.clone();
+        task_tracker.spawn(Self::processing(cfg, rx, task_tracker.clone()));
+        Self { name, tx }
+    }
+
+    pub async fn send(&self, cmd: QueueCommand) -> Result<(), GenericError> {
+        self.tx.send(cmd).await?;
+        Ok(())
     }
 
     async fn processing(
         cfg: config::Queue,
-        qtx: mpsc::Sender<QueueCommand>,
         mut rx: mpsc::Receiver<QueueCommand>,
         task_tracker: TaskTracker,
     ) {
         let name = cfg.name.clone();
         let mut tasks = JoinSet::new();
-        let mut consumers = HashSet::new();
+        let mut consumers = HashMap::new();
         let mut waiters = VecDeque::new();
         let mut messages = VecDeque::new();
+        let mut unacked = DelayQueue::new();
+        let mut unacked_map = HashMap::new();
         let m_received = metrics::QUEUE_COUNTER.with_label_values(&[&name, "received"]);
         let m_sent = metrics::QUEUE_COUNTER.with_label_values(&[&name, "sent"]);
         let m_requeue = metrics::QUEUE_COUNTER.with_label_values(&[&name, "requeue"]);
         let m_drop_limit = metrics::QUEUE_COUNTER.with_label_values(&[&name, "drop-limit"]);
         let m_consumers = metrics::QUEUE_GAUGE.with_label_values(&[&name, "consumers"]);
         let m_messages = metrics::QUEUE_GAUGE.with_label_values(&[&name, "messages"]);
+        let m_unacked = metrics::QUEUE_GAUGE.with_label_values(&[&name, "unacked"]);
         loop {
             if tasks.is_empty() {
                 tasks.spawn(async {
                     tokio::time::sleep(Duration::from_secs(3)).await;
-                    QueueCommand::GracefulShutdown
+                    ConsumerSendResult::GracefulShutdown
                 });
             }
             tokio::select! {
@@ -165,42 +159,67 @@ impl Queue {
                             }
                             m_messages.set(messages.len() as f64);
                         }
+                        QueueCommand::MsgAck(msg_id) => {
+                            if let Some(key) = unacked_map.remove(&msg_id) {
+                                unacked.remove(&key);
+                                m_unacked.inc();
+                            }
+                        }
                         QueueCommand::Requeue(msg) => {
                             m_requeue.inc();
                             messages.push_front(msg);
                             m_messages.set(messages.len() as f64);
                         }
                         QueueCommand::ConsumeStart(consumer) => {
-                            consumers.insert(consumer.id);
+                            let id = consumer.get_id();
+                            let consumer = Arc::new(consumer);
+                            waiters.push_back(consumer.clone());
+                            consumers.insert(id, consumer);
                             m_consumers.inc();
-                            waiters.push_back(consumer);
                         }
-                        QueueCommand::ConsumeStop(consumer) => {
+                        QueueCommand::ConsumeStop(consumer_id) => {
                             m_consumers.dec();
-                            consumers.remove(&consumer.id);
-                            let _ = consumer.q.send(Response::StopConsume(name.clone())).await.is_ok();
+                            if let Some(consumer) = consumers.remove(&consumer_id) {
+                                consumer.stop().await;
+                            }
                         }
-                        QueueCommand::GracefulShutdown => log::error!("unreachable"),
                     };
+                }
+                Some(expired) = unacked.next() => {
+                    if let ConsumerSendResult::RequeueAck(msg, id) = expired.into_inner() {
+                        m_requeue.inc();
+                        messages.push_front(msg);
+                        if let Some(key) = unacked_map.remove(&id) {
+                            unacked.remove(&key);
+                            m_unacked.dec();
+                        }
+                    }
                 }
                 Some(Ok(res)) = tasks.join_next() => {
                     match res {
-                        QueueCommand::Requeue(msg) => {
+                        ConsumerSendResult::Requeue(msg) => {
                             m_requeue.inc();
                             messages.push_front(msg);
                         }
-                        QueueCommand::ConsumeStart(consumer) => {
-                            m_sent.inc();
-                            if consumer.q.send(Response::StartConsume(name.clone())).await.is_ok() {
-                                waiters.push_back(consumer);
-                            };
+                        ConsumerSendResult::RequeueAck(msg, id) => {
+                            m_requeue.inc();
+                            messages.push_front(msg);
+                            if let Some(key) = unacked_map.remove(&id) {
+                                unacked.remove(&key);
+                                m_unacked.dec();
+                            }
                         }
-                        QueueCommand::GracefulShutdown => {
+                        ConsumerSendResult::Consumer(consumer) => {
+                            m_sent.inc();
+                            waiters.push_back(consumer.clone());
+                            let _ = consumer.send_resp(Response::StartConsume(name.clone())).await;
+                        }
+                        ConsumerSendResult::GracefulShutdown => {
                             if task_tracker.is_closed() {
                                 if messages.is_empty() {
-                                    for w in waiters.iter() {
-                                        consumers.remove(&w.id);
-                                        let _ = w.q.send(Response::GracefulShutdown(name.clone())).await;
+                                    for consumer in waiters.iter() {
+                                        consumers.remove(&consumer.get_id());
+                                        let _ = consumer.send_resp(Response::GracefulShutdown(name.clone())).await;
                                     }
                                     if consumers.is_empty() {
                                         log::info!("Shutdown queue {} without messages", &name);
@@ -212,27 +231,33 @@ impl Queue {
                                 }
                             }
                         }
-                        _ => log::error!("unreachable"),
                     };
                 }
             }
             while !messages.is_empty() && !waiters.is_empty() {
                 if let Some(consumer) = waiters.pop_front() {
-                    if consumers.contains(&consumer.id) {
+                    if consumers.contains_key(&consumer.get_id()) {
                         if let Some(msg) = messages.pop_front() {
                             m_messages.set(messages.len() as f64);
-                            let qtx = qtx.clone();
-                            tasks.spawn(async move {
-                                let qmsg = QueueMessage {
-                                    message: msg.clone(),
-                                    queue: qtx,
-                                };
-                                let resp = Response::Message(qmsg);
-                                match consumer.q.send(resp).await {
-                                    Ok(_) => QueueCommand::ConsumeStart(consumer),
-                                    Err(_) => QueueCommand::Requeue(msg),
-                                }
-                            });
+                            if consumer.with_ack() {
+                                let id = Uuid::now_v7().to_string();
+                                let item = ConsumerSendResult::RequeueAck(msg.clone(), id.clone());
+                                let key = unacked.insert(item, Duration::from_secs(60));
+                                unacked_map.insert(id.clone(), key);
+                                tasks.spawn(async move {
+                                    match consumer.send_id(msg.clone(), id.clone()).await {
+                                        Ok(_) => ConsumerSendResult::Consumer(consumer),
+                                        Err(_) => ConsumerSendResult::RequeueAck(msg, id),
+                                    }
+                                });
+                            } else {
+                                tasks.spawn(async move {
+                                    match consumer.send(msg.clone()).await {
+                                        Ok(_) => ConsumerSendResult::Consumer(consumer),
+                                        Err(_) => ConsumerSendResult::Requeue(msg),
+                                    }
+                                });
+                            }
                         }
                     }
                 }

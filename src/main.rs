@@ -3,6 +3,7 @@ pub mod pb {
 }
 pub mod cluster;
 pub mod config;
+pub mod errors;
 pub mod grpc;
 pub mod metrics;
 pub mod server;
@@ -62,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut tasks = tokio::task::JoinSet::new();
 
-    let grpc_srv = grpc::ServiceV1::new(grpc_addr, task_tracker.clone());
+    let grpc_srv = grpc::GrpcService::new(grpc_addr, task_tracker.clone());
     tasks.spawn(async move {
         grpc_srv.run(hsmq).await;
     });
