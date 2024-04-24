@@ -50,6 +50,7 @@ struct GrpcConsumer<T> {
     q: Queue,
     ack: bool,
     m_consume_ok: GenericCounter<AtomicF64>,
+    m_consume_err: GenericCounter<AtomicF64>,
     m_buffer: GenericGauge<AtomicF64>,
 }
 
@@ -63,6 +64,7 @@ impl<T> GrpcConsumer<T> {
     ) -> Self {
         let m_buffer = metrics::GRPC_GAUGE.with_label_values(&["buffer"]);
         let m_consume_ok = metrics::GRPC_COUNTER.with_label_values(&["consume", "ok"]);
+        let m_consume_err = metrics::GRPC_COUNTER.with_label_values(&["consume", "error"]);
 
         Self {
             id,
@@ -72,6 +74,7 @@ impl<T> GrpcConsumer<T> {
             ack,
             m_consume_ok,
             m_buffer,
+            m_consume_err,
         }
     }
     fn new_box(
@@ -101,9 +104,13 @@ impl Consumer for GrpcConsumer<pb::SubscriptionResponse> {
         let resp = pb::SubscriptionResponse {
             kind: Some(subscription_response::Kind::Message(msg)),
         };
-        self.out_tx.send(Result::<_, Status>::Ok(resp)).await?;
-        self.m_consume_ok.inc();
-        Ok(())
+        if let Err(e) = self.out_tx.send(Ok(resp)).await {
+            self.m_consume_err.inc();
+            Err(Box::new(e))
+        } else {
+            self.m_consume_ok.inc();
+            Ok(())
+        }
     }
     async fn send_resp(&self, resp: server::Response) -> Result<(), GenericError> {
         self.in_tx.send(resp)?;
@@ -139,9 +146,13 @@ impl Consumer for GrpcConsumer<pb::Response> {
         let resp = pb::Response {
             kind: Some(pb::response::Kind::Message(msg)),
         };
-        self.out_tx.send(Result::<_, Status>::Ok(resp)).await?;
-        self.m_consume_ok.inc();
-        Ok(())
+        if let Err(e) = self.out_tx.send(Ok(resp)).await {
+            self.m_consume_err.inc();
+            Err(Box::new(e))
+        } else {
+            self.m_consume_ok.inc();
+            Ok(())
+        }
     }
     async fn send_resp(&self, resp: server::Response) -> Result<(), GenericError> {
         self.in_tx.send(resp)?;
