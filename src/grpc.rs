@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 use std::{error::Error, io::ErrorKind};
+use prometheus::core::{AtomicF64, GenericCounter, GenericGauge};
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tokio_util::task::task_tracker::TaskTracker;
@@ -49,6 +49,8 @@ struct GrpcConsumer<T> {
     in_tx: mpsc::UnboundedSender<server::Response>,
     q: Queue,
     ack: bool,
+    m_consume: GenericCounter<AtomicF64>,
+    m_buffer: GenericGauge<AtomicF64>,
 }
 
 impl<T> GrpcConsumer<T> {
@@ -59,12 +61,17 @@ impl<T> GrpcConsumer<T> {
         q: Queue,
         ack: bool,
     ) -> Self {
+        let m_buffer = metrics::GRPC_GAUGE.with_label_values(&["buffer"]);
+        let m_consume = metrics::GRPC_COUNTER.with_label_values(&["consume"]);
+
         Self {
             id,
             out_tx,
             in_tx,
             q,
             ack,
+            m_consume,
+            m_buffer,
         }
     }
     fn new_box(
@@ -95,11 +102,12 @@ impl Consumer for GrpcConsumer<pb::SubscriptionResponse> {
             kind: Some(subscription_response::Kind::Message(msg)),
         };
         self.out_tx.send(Result::<_, Status>::Ok(resp)).await?;
+        self.m_consume.inc();
         Ok(())
     }
     async fn send_resp(&self, resp: server::Response) -> Result<(), GenericError> {
         self.in_tx.send(resp)?;
-        metrics::GRPC_GAUGE.with_label_values(&["buffer"]).inc();
+        self.m_buffer.inc();
         Ok(())
     }
     async fn stop(&self) {
@@ -127,12 +135,13 @@ impl Consumer for GrpcConsumer<pb::Response> {
         let resp = pb::Response {
             kind: Some(pb::response::Kind::Message(msg)),
         };
-        self.out_tx.send_timeout(Result::<_, Status>::Ok(resp), Duration::from_secs(5)).await?;
+        self.out_tx.send(Result::<_, Status>::Ok(resp)).await?;
+        self.m_consume.inc();
         Ok(())
     }
     async fn send_resp(&self, resp: server::Response) -> Result<(), GenericError> {
         self.in_tx.send(resp)?;
-        metrics::GRPC_GAUGE.with_label_values(&["buffer"]).inc();
+        self.m_buffer.inc();
         Ok(())
     }
     async fn stop(&self) {
@@ -369,7 +378,7 @@ impl GrpcStreaming {
                 }
             }
             pb::request::Kind::MessageAck(pb::MessageAck { msg_id, queue }) => {
-                if let Some(queue) = self.subs.get(&queue) {
+                if let Some(queue) = self.queues.get(&queue) {
                     let cmd = QueueCommand::MsgAck(msg_id);
                     if let Err(e) = queue.send(cmd).await {
                         log::error!("Unexpected queue error {:?}", e);
