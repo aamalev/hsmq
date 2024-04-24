@@ -1,5 +1,5 @@
 use crate::errors::GenericError;
-use crate::metrics::GRPC_COUNTER;
+use crate::metrics::{self, GRPC_COUNTER};
 use crate::pb::{
     self, hsmq_server, publish_response, subscription_response, Message, MessageWithId,
     PublishResponse, SubscribeQueueRequest, SubscriptionResponse,
@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use std::{error::Error, io::ErrorKind};
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
@@ -41,10 +42,11 @@ impl GrpcService {
     }
 }
 
+#[derive(Debug)]
 struct GrpcConsumer<T> {
     id: uuid::Uuid,
     out_tx: mpsc::Sender<Result<T, Status>>,
-    in_tx: mpsc::Sender<server::Response>,
+    in_tx: mpsc::UnboundedSender<server::Response>,
     q: Queue,
     ack: bool,
 }
@@ -53,7 +55,7 @@ impl<T> GrpcConsumer<T> {
     fn new(
         id: Uuid,
         out_tx: mpsc::Sender<Result<T, Status>>,
-        in_tx: mpsc::Sender<server::Response>,
+        in_tx: mpsc::UnboundedSender<server::Response>,
         q: Queue,
         ack: bool,
     ) -> Self {
@@ -68,7 +70,7 @@ impl<T> GrpcConsumer<T> {
     fn new_box(
         id: Uuid,
         out_tx: mpsc::Sender<Result<T, Status>>,
-        in_tx: mpsc::Sender<server::Response>,
+        in_tx: mpsc::UnboundedSender<server::Response>,
         q: Queue,
         ack: bool,
     ) -> Box<Self> {
@@ -96,7 +98,8 @@ impl Consumer for GrpcConsumer<pb::SubscriptionResponse> {
         Ok(())
     }
     async fn send_resp(&self, resp: server::Response) -> Result<(), GenericError> {
-        self.in_tx.send(resp).await?;
+        self.in_tx.send(resp)?;
+        metrics::GRPC_GAUGE.with_label_values(&["buffer"]).inc();
         Ok(())
     }
     async fn stop(&self) {
@@ -120,15 +123,16 @@ impl Consumer for GrpcConsumer<pb::Response> {
     }
     async fn send_id(&self, msg: Arc<Envelop>, id: String) -> Result<(), GenericError> {
         let message = Some(msg.message.clone());
-        let msg = MessageWithId { message, id };
+        let msg = MessageWithId { message, id, queue: self.q.name.clone() };
         let resp = pb::Response {
             kind: Some(pb::response::Kind::Message(msg)),
         };
-        self.out_tx.send(Result::<_, Status>::Ok(resp)).await?;
+        self.out_tx.send_timeout(Result::<_, Status>::Ok(resp), Duration::from_secs(5)).await?;
         Ok(())
     }
     async fn send_resp(&self, resp: server::Response) -> Result<(), GenericError> {
-        self.in_tx.send(resp).await?;
+        self.in_tx.send(resp)?;
+        metrics::GRPC_GAUGE.with_label_values(&["buffer"]).inc();
         Ok(())
     }
     async fn stop(&self) {
@@ -208,7 +212,7 @@ impl hsmq_server::Hsmq for HsmqServer {
         req: Request<SubscribeQueueRequest>,
     ) -> HsmqResult<Self::SubscribeQueueStream> {
         let (response_tx, response_rx) = mpsc::channel(1);
-        let (server_tx, _) = mpsc::channel::<server::Response>(1);
+        let (server_tx, _) = mpsc::unbounded_channel::<server::Response>();
 
         log::info!(
             "Subscribe queue {:?} {:?}",
@@ -265,8 +269,8 @@ struct GrpcStreaming {
     out_tx: mpsc::Sender<Result<pb::Response, Status>>,
     subs: HashMap<String, server::Queue>,
     queues: HashMap<String, Queue>,
-    server_tx: mpsc::Sender<server::Response>,
-    server_rx: mpsc::Receiver<server::Response>,
+    server_tx: mpsc::UnboundedSender<server::Response>,
+    server_rx: mpsc::UnboundedReceiver<server::Response>,
 }
 
 impl GrpcStreaming {
@@ -275,7 +279,7 @@ impl GrpcStreaming {
         out_tx: mpsc::Sender<Result<pb::Response, Status>>,
         queues: HashMap<String, Queue>,
     ) {
-        let (server_tx, server_rx) = mpsc::channel::<server::Response>(1);
+        let (server_tx, server_rx) = mpsc::unbounded_channel::<server::Response>();
 
         let subs = HashMap::new();
 
@@ -294,6 +298,7 @@ impl GrpcStreaming {
         tokio::spawn(s.run_loop());
     }
     async fn run_loop(mut self) {
+        let m_buffer = metrics::GRPC_GAUGE.with_label_values(&["buffer"]);
         loop {
             tokio::select! {
                 Some(result) = self.in_stream.next() => {
@@ -305,13 +310,15 @@ impl GrpcStreaming {
                                 }
                             }
                         }
-                        Err(_) => {
+                        Err(e) => {
+                            log::error!("Error in stream {}", e);
                             self.consume_stop().await;
                             break;
                         }
                     }
                 }
                 Some(result) = self.server_rx.recv() => {
+                    m_buffer.dec();
                     match result {
                         server::Response::StartConsume(queue_name) => {
                             if !self.subs.contains_key(&queue_name) {
@@ -324,6 +331,7 @@ impl GrpcStreaming {
                         server::Response::GracefulShutdown(queue_name) => {
                             self.subs.remove(&queue_name);
                             if self.subs.is_empty() {
+                                log::info!("Shutdown channel");
                                 return;
                             }
                         }
@@ -360,9 +368,9 @@ impl GrpcStreaming {
                     }
                 }
             }
-            pb::request::Kind::MessageAck(pb::MessageAck { msg_id }) => {
-                for queue in self.subs.values() {
-                    let cmd = QueueCommand::MsgAck(msg_id.clone());
+            pb::request::Kind::MessageAck(pb::MessageAck { msg_id, queue }) => {
+                if let Some(queue) = self.subs.get(&queue) {
+                    let cmd = QueueCommand::MsgAck(msg_id);
                     if let Err(e) = queue.send(cmd).await {
                         log::error!("Unexpected queue error {:?}", e);
                     };

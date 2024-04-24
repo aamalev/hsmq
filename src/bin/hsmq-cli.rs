@@ -149,11 +149,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::SubscribeQueue { queues } => {
             let s = SubscribeQueueRequest { queue: queues };
             let mut stream = client.subscribe_queue(s).await?.into_inner();
+            let mut count = 0u64;
 
             while let Some(item) = stream.next().await {
                 match item?.kind {
                     Some(subscription_response::Kind::Message(msg)) => {
                         log::info!("Received: {:?}", utils::repr(&msg));
+                        count += 1;
                     }
                     Some(subscription_response::Kind::Redirect(uri)) => {
                         log::info!("Redirect to: {:?}", uri);
@@ -161,6 +163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None => (),
                 }
             }
+            println!("Received {}", count);
         }
         Command::Streaming { command } => match command {
             StreaminCommand::SubscribeQueue { queues } => {
@@ -172,14 +175,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
                 let mut stream = client.streaming(stream).await?.into_inner();
 
+                let mut count = 0u64;
                 while let Some(item) = stream.next().await {
                     match item?.kind {
                         Some(pb::response::Kind::Message(msg)) => {
-                            let cmd = pb::MessageAck { msg_id: msg.id };
+                            let cmd = pb::MessageAck { msg_id: msg.id, queue: msg.queue };
                             let kind = Some(pb::request::Kind::MessageAck(cmd));
                             let req = pb::Request { kind };
                             tx.send(req).await.unwrap();
                             log::info!("Received: {:?}", utils::repr(&msg.message.unwrap()));
+                            count += 1;
                         }
                         Some(pb::response::Kind::Redirect(uri)) => {
                             log::info!("Redirect to: {:?}", uri);
@@ -187,6 +192,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         None => (),
                     }
                 }
+                println!("Received {}", count);
             }
         },
     }
