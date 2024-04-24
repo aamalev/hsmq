@@ -37,10 +37,12 @@ message SubscriptionResponse {
 message MessageWithId {
     Message message = 1;
     string id = 2;
+    string queue = 3;
 }
 
 message MessageAck {
     string msg_id = 1;
+    string queue = 2;
 }
 
 message MessageRequeue {
