@@ -5,12 +5,12 @@ use crate::pb::{
     PublishResponse, SubscribeQueueRequest, SubscriptionResponse,
 };
 use crate::server::{self, Consumer, Envelop, HsmqServer, Queue, QueueCommand};
+use prometheus::core::{AtomicF64, GenericCounter, GenericGauge};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::{error::Error, io::ErrorKind};
-use prometheus::core::{AtomicF64, GenericCounter, GenericGauge};
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tokio_util::task::task_tracker::TaskTracker;
@@ -49,7 +49,7 @@ struct GrpcConsumer<T> {
     in_tx: mpsc::UnboundedSender<server::Response>,
     q: Queue,
     ack: bool,
-    m_consume: GenericCounter<AtomicF64>,
+    m_consume_ok: GenericCounter<AtomicF64>,
     m_buffer: GenericGauge<AtomicF64>,
 }
 
@@ -62,7 +62,7 @@ impl<T> GrpcConsumer<T> {
         ack: bool,
     ) -> Self {
         let m_buffer = metrics::GRPC_GAUGE.with_label_values(&["buffer"]);
-        let m_consume = metrics::GRPC_COUNTER.with_label_values(&["consume"]);
+        let m_consume_ok = metrics::GRPC_COUNTER.with_label_values(&["consume", "ok"]);
 
         Self {
             id,
@@ -70,7 +70,7 @@ impl<T> GrpcConsumer<T> {
             in_tx,
             q,
             ack,
-            m_consume,
+            m_consume_ok,
             m_buffer,
         }
     }
@@ -102,7 +102,7 @@ impl Consumer for GrpcConsumer<pb::SubscriptionResponse> {
             kind: Some(subscription_response::Kind::Message(msg)),
         };
         self.out_tx.send(Result::<_, Status>::Ok(resp)).await?;
-        self.m_consume.inc();
+        self.m_consume_ok.inc();
         Ok(())
     }
     async fn send_resp(&self, resp: server::Response) -> Result<(), GenericError> {
@@ -131,12 +131,16 @@ impl Consumer for GrpcConsumer<pb::Response> {
     }
     async fn send_id(&self, msg: Arc<Envelop>, id: String) -> Result<(), GenericError> {
         let message = Some(msg.message.clone());
-        let msg = MessageWithId { message, id, queue: self.q.name.clone() };
+        let msg = MessageWithId {
+            message,
+            id,
+            queue: self.q.name.clone(),
+        };
         let resp = pb::Response {
             kind: Some(pb::response::Kind::Message(msg)),
         };
         self.out_tx.send(Result::<_, Status>::Ok(resp)).await?;
-        self.m_consume.inc();
+        self.m_consume_ok.inc();
         Ok(())
     }
     async fn send_resp(&self, resp: server::Response) -> Result<(), GenericError> {
