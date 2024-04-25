@@ -2,6 +2,7 @@ use crate::config::{self, Config};
 use crate::errors::GenericError;
 use crate::metrics;
 use crate::pb::Message;
+use prometheus::core::{AtomicF64, GenericGauge};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::Debug;
 use std::pin::Pin;
@@ -17,11 +18,13 @@ use uuid::Uuid;
 #[derive(Debug)]
 pub struct Envelop {
     pub message: Message,
+    pub id: String,
 }
 
 impl Envelop {
     pub fn new(message: Message) -> Self {
-        Self { message }
+        let id = Uuid::now_v7().to_string();
+        Self { message, id }
     }
 
     pub fn gen_msg_id(&self) -> Uuid {
@@ -76,19 +79,66 @@ impl Subscription {
 }
 
 #[derive(Debug)]
-enum ConsumerSendResult {
-    Consumer(Arc<GenericConsumer>),
+pub enum ConsumerSendResult {
+    Consumer(Uuid),
     Requeue(Arc<Envelop>),
-    RequeueAck(Arc<Envelop>, String),
+    RequeueAck(Arc<Envelop>),
     GracefulShutdown,
+}
+
+pub struct UnAck {
+    delay: DelayQueue<Arc<Envelop>>,
+    unacked_map: HashMap<String, delay_queue::Key>,
+    m_unacked: GenericGauge<AtomicF64>,
+    m_ack_after: GenericGauge<AtomicF64>,
+    timeout: Duration,
+}
+
+impl UnAck {
+    fn new(queue_name: String, timeout: Duration) -> Self {
+        let delay = DelayQueue::new();
+        let unacked_map = HashMap::new();
+        let m_unacked = metrics::QUEUE_GAUGE.with_label_values(&[&queue_name, "unacked"]);
+        let m_ack_after = metrics::QUEUE_GAUGE.with_label_values(&[&queue_name, "ack-after"]);
+        Self {
+            delay,
+            unacked_map,
+            m_unacked,
+            m_ack_after,
+            timeout,
+        }
+    }
+    pub fn insert(&mut self, value: Arc<Envelop>) -> String {
+        let id = value.id.clone();
+        let key = self.delay.insert(value, self.timeout);
+        self.unacked_map.insert(id.clone(), key);
+        self.m_unacked.inc();
+        id
+    }
+    fn remove(&mut self, id: &String, requeue: bool) -> Option<delay_queue::Expired<Arc<Envelop>>> {
+        if let Some(key) = self.unacked_map.remove(id) {
+            if let Some(exp) = self.delay.try_remove(&key) {
+                self.m_unacked.dec();
+                return Some(exp);
+            } else if requeue {
+                self.m_unacked.dec();
+            } else {
+                self.m_ack_after.inc();
+            }
+        }
+        None
+    }
 }
 
 #[tonic::async_trait]
 pub trait Consumer: Debug {
     fn get_id(&self) -> Uuid;
-    fn with_ack(&self) -> bool;
-    async fn send(&self, msg: Arc<Envelop>) -> Result<(), GenericError>;
-    async fn send_id(&self, msg: Arc<Envelop>, id: String) -> Result<(), GenericError>;
+    fn send(
+        &self,
+        msg: Arc<Envelop>,
+        tasks: &mut JoinSet<ConsumerSendResult>,
+        unack: &mut UnAck,
+    ) -> Option<Arc<Envelop>>;
     async fn send_resp(&self, resp: Response) -> Result<(), GenericError>;
     async fn stop(&self);
 }
@@ -133,15 +183,14 @@ impl Queue {
         let mut consumers = HashMap::new();
         let mut waiters = VecDeque::new();
         let mut messages = VecDeque::new();
-        let mut unacked = DelayQueue::new();
-        let mut unacked_map: HashMap<String, delay_queue::Key> = HashMap::new();
+        let mut unack = UnAck::new(name.clone(), Duration::from_secs(60));
         let m_received = metrics::QUEUE_COUNTER.with_label_values(&[&name, "received"]);
         let m_sent = metrics::QUEUE_COUNTER.with_label_values(&[&name, "sent"]);
         let m_requeue = metrics::QUEUE_COUNTER.with_label_values(&[&name, "requeue"]);
+        let m_ack_timeout = metrics::QUEUE_COUNTER.with_label_values(&[&name, "ack-timeout"]);
         let m_drop_limit = metrics::QUEUE_COUNTER.with_label_values(&[&name, "drop-limit"]);
         let m_consumers = metrics::QUEUE_GAUGE.with_label_values(&[&name, "consumers"]);
         let m_messages = metrics::QUEUE_GAUGE.with_label_values(&[&name, "messages"]);
-        let m_unacked = metrics::QUEUE_GAUGE.with_label_values(&[&name, "unacked"]);
         loop {
             if tasks.is_empty() {
                 tasks.spawn(async {
@@ -166,11 +215,7 @@ impl Queue {
                         }
                         QueueCommand::MsgAck(msg_id) => {
                             log::debug!("Received ack {:?}", &msg_id);
-                            if let Some(key) = unacked_map.remove(&msg_id) {
-                                if let Some(_) = unacked.try_remove(&key) {
-                                    m_unacked.dec();
-                                }
-                            }
+                            unack.remove(&msg_id, false);
                         }
                         QueueCommand::Requeue(msg) => {
                             m_requeue.inc();
@@ -179,8 +224,7 @@ impl Queue {
                         }
                         QueueCommand::ConsumeStart(consumer) => {
                             let id = consumer.get_id();
-                            let consumer = Arc::new(consumer);
-                            waiters.push_back(consumer.clone());
+                            waiters.push_back(id);
                             consumers.insert(id, consumer);
                             m_consumers.inc();
                         }
@@ -192,16 +236,12 @@ impl Queue {
                         }
                     };
                 }
-                Some(expired) = unacked.next() => {
-                    if let ConsumerSendResult::RequeueAck(msg, id) = expired.into_inner() {
-                        m_requeue.inc();
-                        messages.push_front(msg);
-                        if let Some(key) = unacked_map.remove(&id) {
-                            if let Some(_) = unacked.try_remove(&key) {
-                                m_unacked.dec();
-                            }
-                        }
-                    }
+                Some(expired) = unack.delay.next() => {
+                    let msg = expired.into_inner();
+                    m_ack_timeout.inc();
+                    unack.remove(&msg.id, true);
+                    messages.push_front(msg);
+                    m_messages.set(messages.len() as f64);
                 }
                 Some(res) = tasks.join_next() => {
                     match res {
@@ -210,25 +250,26 @@ impl Queue {
                             m_requeue.inc();
                             messages.push_front(msg);
                         }
-                        Ok(ConsumerSendResult::RequeueAck(msg, id)) => {
+                        Ok(ConsumerSendResult::RequeueAck(msg)) => {
                             log::debug!("Received requeue ack msg {:?}", &msg);
                             m_requeue.inc();
+                            unack.remove(&msg.id, true);
                             messages.push_front(msg);
-                            if let Some(key) = unacked_map.remove(&id) {
-                                unacked.try_remove(&key);
-                            }
                         }
-                        Ok(ConsumerSendResult::Consumer(consumer)) => {
+                        Ok(ConsumerSendResult::Consumer(consumer_id)) => {
                             m_sent.inc();
-                            waiters.push_back(consumer.clone());
-                            let _ = consumer.send_resp(Response::StartConsume(name.clone())).await;
+                            if let Some(consumer) = consumers.get_mut(&consumer_id) {
+                                waiters.push_back(consumer_id);
+                                let _ = consumer.send_resp(Response::StartConsume(name.clone())).await;
+                            }
                         }
                         Ok(ConsumerSendResult::GracefulShutdown) => {
                             if task_tracker.is_closed() {
                                 if messages.is_empty() {
-                                    for consumer in waiters.iter() {
-                                        consumers.remove(&consumer.get_id());
-                                        let _ = consumer.send_resp(Response::GracefulShutdown(name.clone())).await;
+                                    for consumer_id in waiters.iter() {
+                                        if let Some(consumer) = consumers.remove(consumer_id) {
+                                            let _ = consumer.send_resp(Response::GracefulShutdown(name.clone())).await;
+                                        }
                                     }
                                     if consumers.is_empty() {
                                         log::info!("Shutdown queue {} without messages", &name);
@@ -247,29 +288,12 @@ impl Queue {
                 }
             }
             while !messages.is_empty() && !waiters.is_empty() {
-                if let Some(consumer) = waiters.pop_front() {
-                    if consumers.contains_key(&consumer.get_id()) {
+                if let Some(consumer_id) = waiters.pop_front() {
+                    if let Some(consumer) = consumers.get_mut(&consumer_id) {
                         if let Some(msg) = messages.pop_front() {
                             m_messages.set(messages.len() as f64);
-                            if consumer.with_ack() {
-                                let id = Uuid::now_v7().to_string();
-                                let item = ConsumerSendResult::RequeueAck(msg.clone(), id.clone());
-                                let key = unacked.insert(item, Duration::from_secs(60));
-                                unacked_map.insert(id.clone(), key);
-                                m_unacked.inc();
-                                tasks.spawn(async move {
-                                    match consumer.send_id(msg.clone(), id.clone()).await {
-                                        Ok(_) => ConsumerSendResult::Consumer(consumer),
-                                        Err(_) => ConsumerSendResult::RequeueAck(msg, id),
-                                    }
-                                });
-                            } else {
-                                tasks.spawn(async move {
-                                    match consumer.send(msg.clone()).await {
-                                        Ok(_) => ConsumerSendResult::Consumer(consumer),
-                                        Err(_) => ConsumerSendResult::Requeue(msg),
-                                    }
-                                });
+                            if let Some(msg) = consumer.send(msg, &mut tasks, &mut unack) {
+                                messages.push_front(msg);
                             }
                         }
                     }
