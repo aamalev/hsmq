@@ -107,7 +107,7 @@ impl Consumer for GrpcConsumer<pb::SubscriptionResponse> {
             };
             if let Err(_e) = out_tx.send(Ok(resp)).await {
                 m_consume_err.inc();
-                ConsumerSendResult::Requeue(msg)
+                ConsumerSendResult::Requeue(msg, consumer_id)
             } else {
                 m_consume_ok.inc();
                 ConsumerSendResult::Consumer(consumer_id)
@@ -399,7 +399,7 @@ impl GrpcStreaming {
             }
             pb::request::Kind::MessageAck(pb::MessageAck { msg_id, queue }) => {
                 if let Some(queue) = self.queues.get(&queue) {
-                    let cmd = QueueCommand::MsgAck(msg_id);
+                    let cmd = QueueCommand::MsgAck(msg_id, self.consumer_id);
                     if let Err(e) = queue.send(cmd).await {
                         log::error!("Unexpected queue error {:?}", e);
                     };

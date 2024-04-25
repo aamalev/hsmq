@@ -81,7 +81,7 @@ impl Subscription {
 #[derive(Debug)]
 pub enum ConsumerSendResult {
     Consumer(Uuid),
-    Requeue(Arc<Envelop>),
+    Requeue(Arc<Envelop>, Uuid),
     RequeueAck(Arc<Envelop>),
     GracefulShutdown,
 }
@@ -148,7 +148,7 @@ pub type GenericConsumer = Box<dyn Consumer + Send + Sync + 'static>;
 
 pub enum QueueCommand {
     Msg(Arc<Envelop>),
-    MsgAck(String),
+    MsgAck(String, Uuid),
     Requeue(Arc<Envelop>),
     ConsumeStart(GenericConsumer),
     ConsumeStop(Uuid),
@@ -180,7 +180,7 @@ impl Queue {
     ) {
         let name = cfg.name.clone();
         let mut tasks = JoinSet::new();
-        let mut consumers = HashMap::new();
+        let mut consumers: HashMap<Uuid, GenericConsumer> = HashMap::new();
         let mut waiters = VecDeque::new();
         let mut messages = VecDeque::new();
         let mut unack = UnAck::new(name.clone(), Duration::from_secs(60));
@@ -204,7 +204,17 @@ impl Queue {
                         QueueCommand::Msg(msg) => {
                             log::debug!("Received msg {:?}", &msg);
                             m_received.inc();
-                            messages.push_back(msg);
+                            if let Some(consumer_id) = waiters.pop_front() {
+                                if let Some(consumer) = consumers.get_mut(&consumer_id) {
+                                    if let Some(msg) = consumer.send(msg, &mut tasks, &mut unack) {
+                                        messages.push_back(msg);
+                                    }
+                                } else {
+                                    messages.push_back(msg);
+                                }
+                            } else {
+                                messages.push_back(msg);
+                            }
                             if let Some(limit) = cfg.limit {
                                 while messages.len() > limit {
                                     messages.pop_front();
@@ -213,9 +223,18 @@ impl Queue {
                             }
                             m_messages.set(messages.len() as f64);
                         }
-                        QueueCommand::MsgAck(msg_id) => {
+                        QueueCommand::MsgAck(msg_id, consumer_id) => {
                             log::debug!("Received ack {:?}", &msg_id);
                             unack.remove(&msg_id, false);
+                            if let Some(consumer) = consumers.get_mut(&consumer_id) {
+                                if let Some(msg) = messages.pop_front() {
+                                    if let Some(msg) = consumer.send(msg, &mut tasks, &mut unack) {
+                                        messages.push_front(msg);
+                                    } else {
+                                        m_messages.dec();
+                                    }
+                                }
+                            }
                         }
                         QueueCommand::Requeue(msg) => {
                             m_requeue.inc();
@@ -225,12 +244,13 @@ impl Queue {
                         QueueCommand::ConsumeStart(consumer) => {
                             let id = consumer.get_id();
                             waiters.push_back(id);
+                            let _ = consumer.send_resp(Response::StartConsume(name.clone())).await;
                             consumers.insert(id, consumer);
                             m_consumers.inc();
                         }
                         QueueCommand::ConsumeStop(consumer_id) => {
-                            m_consumers.dec();
                             if let Some(consumer) = consumers.remove(&consumer_id) {
+                                m_consumers.dec();
                                 consumer.stop().await;
                             }
                         }
@@ -245,10 +265,12 @@ impl Queue {
                 }
                 Some(res) = tasks.join_next() => {
                     match res {
-                        Ok(ConsumerSendResult::Requeue(msg)) => {
+                        Ok(ConsumerSendResult::Requeue(msg, consumer_id)) => {
                             log::debug!("Received requeue msg {:?}", &msg);
                             m_requeue.inc();
                             messages.push_front(msg);
+                            m_consumers.dec();
+                            consumers.remove(&consumer_id);
                         }
                         Ok(ConsumerSendResult::RequeueAck(msg)) => {
                             log::debug!("Received requeue ack msg {:?}", &msg);
@@ -258,10 +280,7 @@ impl Queue {
                         }
                         Ok(ConsumerSendResult::Consumer(consumer_id)) => {
                             m_sent.inc();
-                            if let Some(consumer) = consumers.get_mut(&consumer_id) {
-                                waiters.push_back(consumer_id);
-                                let _ = consumer.send_resp(Response::StartConsume(name.clone())).await;
-                            }
+                            waiters.push_back(consumer_id);
                         }
                         Ok(ConsumerSendResult::GracefulShutdown) => {
                             if task_tracker.is_closed() {
