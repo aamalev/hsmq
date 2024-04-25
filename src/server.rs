@@ -204,25 +204,12 @@ impl Queue {
                         QueueCommand::Msg(msg) => {
                             log::debug!("Received msg {:?}", &msg);
                             m_received.inc();
-                            if messages.is_empty() {
-                                if let Some(consumer_id) = waiters.pop_front() {
-                                    if let Some(consumer) = consumers.get_mut(&consumer_id) {
-                                        if let Some(msg) = consumer.send(msg, &mut tasks, &mut unack) {
-                                            messages.push_back(msg);
-                                        }
-                                    } else {
-                                        messages.push_back(msg);
-                                    }
-                                } else {
-                                    messages.push_back(msg);
-                                }
-                            } else if let Some(limit) = cfg.limit {
+                            messages.push_back(msg);
+                            if let Some(limit) = cfg.limit {
                                 while messages.len() > limit {
                                     messages.pop_front();
                                     m_drop_limit.inc();
                                 }
-                            } else {
-                                messages.push_back(msg);
                             }
                             m_messages.set(messages.len() as f64);
                         }
