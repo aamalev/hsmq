@@ -213,18 +213,9 @@ impl Queue {
                             }
                             m_messages.set(messages.len() as f64);
                         }
-                        QueueCommand::MsgAck(msg_id, consumer_id) => {
+                        QueueCommand::MsgAck(msg_id, _consumer_id) => {
                             log::debug!("Received ack {:?}", &msg_id);
                             unack.remove(&msg_id, false);
-                            if let Some(consumer) = consumers.get_mut(&consumer_id) {
-                                if let Some(msg) = messages.pop_front() {
-                                    if let Some(msg) = consumer.send(msg, &mut tasks, &mut unack) {
-                                        messages.push_front(msg);
-                                    } else {
-                                        m_messages.dec();
-                                    }
-                                }
-                            }
                         }
                         QueueCommand::Requeue(msg) => {
                             m_requeue.inc();
