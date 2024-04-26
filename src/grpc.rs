@@ -4,7 +4,7 @@ use crate::pb::{
     self, hsmq_server, publish_response, subscription_response, Message, MessageWithId,
     PublishResponse, SubscribeQueueRequest, SubscriptionResponse,
 };
-use crate::server::{self, Consumer, ConsumerSendResult, Envelop, HsmqServer, Queue, QueueCommand};
+use crate::server::{self, Consumer, ConsumerSendResult, Envelop, HsmqServer, QueueCommand};
 use prometheus::core::{AtomicF64, GenericCounter, GenericGauge};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -48,7 +48,7 @@ struct GrpcConsumer<T> {
     id: uuid::Uuid,
     out_tx: mpsc::Sender<Result<T, Status>>,
     in_tx: mpsc::UnboundedSender<server::Response>,
-    q: Queue,
+    q: server::GenericQueue,
     m_consume_ok: GenericCounter<AtomicF64>,
     m_consume_err: GenericCounter<AtomicF64>,
     m_buffer: GenericGauge<AtomicF64>,
@@ -59,7 +59,7 @@ impl<T> GrpcConsumer<T> {
         id: Uuid,
         out_tx: mpsc::Sender<Result<T, Status>>,
         in_tx: mpsc::UnboundedSender<server::Response>,
-        q: Queue,
+        q: server::GenericQueue,
     ) -> Self {
         let m_buffer = metrics::GRPC_GAUGE.with_label_values(&["buffer"]);
         let m_consume_ok = metrics::GRPC_COUNTER.with_label_values(&["consume", "ok"]);
@@ -79,7 +79,7 @@ impl<T> GrpcConsumer<T> {
         id: Uuid,
         out_tx: mpsc::Sender<Result<T, Status>>,
         in_tx: mpsc::UnboundedSender<server::Response>,
-        q: Queue,
+        q: server::GenericQueue,
     ) -> Box<Self> {
         Box::new(Self::new(id, out_tx, in_tx, q))
     }
@@ -121,7 +121,7 @@ impl Consumer for GrpcConsumer<pb::SubscriptionResponse> {
         Ok(())
     }
     async fn stop(&self) {
-        let queue_name = self.q.name.clone();
+        let queue_name = self.q.get_name();
         let _ = self
             .send_resp(server::Response::StopConsume(queue_name))
             .await;
@@ -142,7 +142,7 @@ impl Consumer for GrpcConsumer<pb::Response> {
         let consumer_id = self.id;
         let id = unack.insert(msg.clone());
         let out_tx = self.out_tx.clone();
-        let queue = self.q.name.clone();
+        let queue = self.q.get_name();
         let m_consume_err = self.m_consume_err.clone();
         let m_consume_ok = self.m_consume_ok.clone();
         tasks.spawn(async move {
@@ -167,7 +167,7 @@ impl Consumer for GrpcConsumer<pb::Response> {
         Ok(())
     }
     async fn stop(&self) {
-        let queue_name = self.q.name.clone();
+        let queue_name = self.q.get_name();
         let _ = self
             .send_resp(server::Response::StopConsume(queue_name))
             .await;
@@ -297,8 +297,8 @@ struct GrpcStreaming {
     consumer_id: Uuid,
     in_stream: Streaming<pb::Request>,
     out_tx: mpsc::Sender<Result<pb::Response, Status>>,
-    subs: HashMap<String, server::Queue>,
-    queues: HashMap<String, Queue>,
+    subs: HashMap<String, server::GenericQueue>,
+    queues: HashMap<String, server::GenericQueue>,
     server_tx: mpsc::UnboundedSender<server::Response>,
     server_rx: mpsc::UnboundedReceiver<server::Response>,
 }
@@ -307,7 +307,7 @@ impl GrpcStreaming {
     fn spawn(
         in_stream: Streaming<pb::Request>,
         out_tx: mpsc::Sender<Result<pb::Response, Status>>,
-        queues: HashMap<String, Queue>,
+        queues: HashMap<String, server::GenericQueue>,
     ) {
         let (server_tx, server_rx) = mpsc::unbounded_channel::<server::Response>();
 
