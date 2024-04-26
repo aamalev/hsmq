@@ -4,7 +4,7 @@ use crate::pb::{
     self, hsmq_server, publish_response, subscription_response, Message, MessageWithId,
     PublishResponse, SubscribeQueueRequest, SubscriptionResponse,
 };
-use crate::server::{self, Consumer, ConsumerSendResult, Envelop, GenericQueue, HsmqServer, QueueCommand};
+use crate::server::{self, Consumer, ConsumerSendResult, Envelop, HsmqServer, QueueCommand};
 use prometheus::core::{AtomicF64, GenericCounter, GenericGauge};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -48,7 +48,7 @@ struct GrpcConsumer<T> {
     id: uuid::Uuid,
     out_tx: mpsc::Sender<Result<T, Status>>,
     in_tx: mpsc::UnboundedSender<server::Response>,
-    q: GenericQueue,
+    q: server::GenericQueue,
     m_consume_ok: GenericCounter<AtomicF64>,
     m_consume_err: GenericCounter<AtomicF64>,
     m_buffer: GenericGauge<AtomicF64>,
@@ -59,7 +59,7 @@ impl<T> GrpcConsumer<T> {
         id: Uuid,
         out_tx: mpsc::Sender<Result<T, Status>>,
         in_tx: mpsc::UnboundedSender<server::Response>,
-        q: GenericQueue,
+        q: server::GenericQueue,
     ) -> Self {
         let m_buffer = metrics::GRPC_GAUGE.with_label_values(&["buffer"]);
         let m_consume_ok = metrics::GRPC_COUNTER.with_label_values(&["consume", "ok"]);
@@ -79,7 +79,7 @@ impl<T> GrpcConsumer<T> {
         id: Uuid,
         out_tx: mpsc::Sender<Result<T, Status>>,
         in_tx: mpsc::UnboundedSender<server::Response>,
-        q: GenericQueue,
+        q: server::GenericQueue,
     ) -> Box<Self> {
         Box::new(Self::new(id, out_tx, in_tx, q))
     }
