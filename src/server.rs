@@ -1,22 +1,30 @@
 use crate::config::{self, Config};
+use crate::errors::GenericError;
 use crate::metrics;
 use crate::pb::Message;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use prometheus::core::{AtomicF64, GenericGauge};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::fmt::Debug;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinSet;
+use tokio_stream::StreamExt;
 use tokio_util::task::task_tracker::TaskTracker;
+use tokio_util::time::delay_queue::{self, DelayQueue};
 use uuid::Uuid;
 
 #[derive(Debug)]
 pub struct Envelop {
     pub message: Message,
+    pub id: String,
 }
 
 impl Envelop {
     pub fn new(message: Message) -> Self {
-        Self { message }
+        let id = Uuid::now_v7().to_string();
+        Self { message, id }
     }
 
     pub fn gen_msg_id(&self) -> Uuid {
@@ -26,8 +34,6 @@ impl Envelop {
 
 #[derive(Debug)]
 pub enum Response {
-    Message(QueueMessage),
-    MessageAck(String),
     StartConsume(String),
     StopConsume(String),
     GracefulShutdown(String),
@@ -59,7 +65,9 @@ impl Subscription {
     pub async fn send(&self, msg: Envelop) {
         let msg = Arc::new(msg);
         for qtx in self.subs.iter() {
-            qtx.send(QueueCommand::Msg(msg.clone())).await.unwrap();
+            if let Err(e) = qtx.send(QueueCommand::Msg(msg.clone())).await {
+                log::error!("Error send command {}", e);
+            }
         }
         if self.broadcast.receiver_count() > 0 {
             match self.broadcast.send(msg) {
@@ -71,76 +79,115 @@ impl Subscription {
 }
 
 #[derive(Debug)]
-pub struct QueueMessage {
-    message: Arc<Envelop>,
-    queue: mpsc::Sender<QueueCommand>,
-}
-
-impl QueueMessage {
-    pub async fn requeue(&self) {
-        let m = QueueCommand::Requeue(self.message.clone());
-        self.queue.send(m).await.unwrap();
-    }
-
-    pub fn message_clone(&self) -> Message {
-        self.message.message.clone()
-    }
-
-    pub async fn stop_consume(&self, consumer: Consumer) {
-        let cmd = QueueCommand::ConsumeStop(consumer);
-        self.queue.send(cmd).await.unwrap();
-    }
-}
-
-#[derive(Clone)]
-pub struct Consumer {
-    id: Uuid,
-    q: mpsc::Sender<Response>,
-}
-
-impl Consumer {
-    pub fn new(q: mpsc::Sender<Response>) -> Self {
-        Self {
-            id: Uuid::now_v7(),
-            q,
-        }
-    }
-}
-
-pub enum QueueCommand {
-    Msg(Arc<Envelop>),
-    Requeue(Arc<Envelop>),
-    ConsumeStart(Consumer),
-    ConsumeStop(Consumer),
+pub enum ConsumerSendResult {
+    Consumer(Uuid),
+    Requeue(Arc<Envelop>, Uuid),
+    RequeueAck(Arc<Envelop>),
     GracefulShutdown,
 }
 
-#[derive(Clone)]
+pub struct UnAck {
+    delay: DelayQueue<Arc<Envelop>>,
+    unacked_map: HashMap<String, delay_queue::Key>,
+    m_unacked: GenericGauge<AtomicF64>,
+    m_ack_after: GenericGauge<AtomicF64>,
+    timeout: Duration,
+}
+
+impl UnAck {
+    fn new(queue_name: String, timeout: Duration) -> Self {
+        let delay = DelayQueue::new();
+        let unacked_map = HashMap::new();
+        let m_unacked = metrics::QUEUE_GAUGE.with_label_values(&[&queue_name, "unacked"]);
+        let m_ack_after = metrics::QUEUE_GAUGE.with_label_values(&[&queue_name, "ack-after"]);
+        Self {
+            delay,
+            unacked_map,
+            m_unacked,
+            m_ack_after,
+            timeout,
+        }
+    }
+    pub fn insert(&mut self, value: Arc<Envelop>) -> String {
+        let id = value.id.clone();
+        let key = self.delay.insert(value, self.timeout);
+        self.unacked_map.insert(id.clone(), key);
+        self.m_unacked.inc();
+        id
+    }
+    fn remove(&mut self, id: &String, requeue: bool) -> Option<delay_queue::Expired<Arc<Envelop>>> {
+        if let Some(key) = self.unacked_map.remove(id) {
+            if let Some(exp) = self.delay.try_remove(&key) {
+                self.m_unacked.dec();
+                return Some(exp);
+            } else if requeue {
+                self.m_unacked.dec();
+            } else {
+                self.m_ack_after.inc();
+            }
+        }
+        None
+    }
+}
+
+#[tonic::async_trait]
+pub trait Consumer: Debug {
+    fn get_id(&self) -> Uuid;
+    fn send(
+        &self,
+        msg: Arc<Envelop>,
+        tasks: &mut JoinSet<ConsumerSendResult>,
+        unack: &mut UnAck,
+    ) -> Option<Arc<Envelop>>;
+    async fn send_resp(&self, resp: Response) -> Result<(), GenericError>;
+    async fn stop(&self);
+}
+
+pub type GenericFuture<T> = Pin<Box<(dyn std::future::Future<Output = T> + Send + 'static)>>;
+pub type GenericConsumer = Box<dyn Consumer + Send + Sync + 'static>;
+
+pub enum QueueCommand {
+    Msg(Arc<Envelop>),
+    MsgAck(String, Uuid),
+    Requeue(Arc<Envelop>),
+    ConsumeStart(GenericConsumer),
+    ConsumeStop(Uuid),
+}
+
+#[derive(Clone, Debug)]
 pub struct Queue {
-    pub tx: mpsc::Sender<QueueCommand>,
+    pub name: String,
+    tx: mpsc::Sender<QueueCommand>,
 }
 
 impl Queue {
     fn new(cfg: config::Queue, task_tracker: TaskTracker) -> Self {
         let (tx, rx) = mpsc::channel(99);
-        task_tracker.spawn(Self::processing(cfg, tx.clone(), rx, task_tracker.clone()));
-        Self { tx }
+        let name = cfg.name.clone();
+        task_tracker.spawn(Self::processing(cfg, rx, task_tracker.clone()));
+        Self { name, tx }
+    }
+
+    pub async fn send(&self, cmd: QueueCommand) -> Result<(), GenericError> {
+        self.tx.send(cmd).await?;
+        Ok(())
     }
 
     async fn processing(
         cfg: config::Queue,
-        qtx: mpsc::Sender<QueueCommand>,
         mut rx: mpsc::Receiver<QueueCommand>,
         task_tracker: TaskTracker,
     ) {
         let name = cfg.name.clone();
         let mut tasks = JoinSet::new();
-        let mut consumers = HashSet::new();
+        let mut consumers: HashMap<Uuid, GenericConsumer> = HashMap::new();
         let mut waiters = VecDeque::new();
         let mut messages = VecDeque::new();
+        let mut unack = UnAck::new(name.clone(), Duration::from_secs(60));
         let m_received = metrics::QUEUE_COUNTER.with_label_values(&[&name, "received"]);
         let m_sent = metrics::QUEUE_COUNTER.with_label_values(&[&name, "sent"]);
         let m_requeue = metrics::QUEUE_COUNTER.with_label_values(&[&name, "requeue"]);
+        let m_ack_timeout = metrics::QUEUE_COUNTER.with_label_values(&[&name, "ack-timeout"]);
         let m_drop_limit = metrics::QUEUE_COUNTER.with_label_values(&[&name, "drop-limit"]);
         let m_consumers = metrics::QUEUE_GAUGE.with_label_values(&[&name, "consumers"]);
         let m_messages = metrics::QUEUE_GAUGE.with_label_values(&[&name, "messages"]);
@@ -148,13 +195,14 @@ impl Queue {
             if tasks.is_empty() {
                 tasks.spawn(async {
                     tokio::time::sleep(Duration::from_secs(3)).await;
-                    QueueCommand::GracefulShutdown
+                    ConsumerSendResult::GracefulShutdown
                 });
             }
             tokio::select! {
                 Some(cmd) = rx.recv() => {
                     match cmd {
                         QueueCommand::Msg(msg) => {
+                            log::debug!("Received msg {:?}", &msg);
                             m_received.inc();
                             messages.push_back(msg);
                             if let Some(limit) = cfg.limit {
@@ -165,42 +213,63 @@ impl Queue {
                             }
                             m_messages.set(messages.len() as f64);
                         }
+                        QueueCommand::MsgAck(msg_id, _consumer_id) => {
+                            log::debug!("Received ack {:?}", &msg_id);
+                            unack.remove(&msg_id, false);
+                        }
                         QueueCommand::Requeue(msg) => {
                             m_requeue.inc();
                             messages.push_front(msg);
                             m_messages.set(messages.len() as f64);
                         }
                         QueueCommand::ConsumeStart(consumer) => {
-                            consumers.insert(consumer.id);
+                            let id = consumer.get_id();
+                            waiters.push_back(id);
+                            let _ = consumer.send_resp(Response::StartConsume(name.clone())).await;
+                            consumers.insert(id, consumer);
                             m_consumers.inc();
-                            waiters.push_back(consumer);
                         }
-                        QueueCommand::ConsumeStop(consumer) => {
-                            m_consumers.dec();
-                            consumers.remove(&consumer.id);
-                            let _ = consumer.q.send(Response::StopConsume(name.clone())).await.is_ok();
+                        QueueCommand::ConsumeStop(consumer_id) => {
+                            if let Some(consumer) = consumers.remove(&consumer_id) {
+                                m_consumers.dec();
+                                consumer.stop().await;
+                            }
                         }
-                        QueueCommand::GracefulShutdown => log::error!("unreachable"),
                     };
                 }
-                Some(Ok(res)) = tasks.join_next() => {
+                Some(expired) = unack.delay.next() => {
+                    let msg = expired.into_inner();
+                    m_ack_timeout.inc();
+                    unack.remove(&msg.id, true);
+                    messages.push_front(msg);
+                    m_messages.set(messages.len() as f64);
+                }
+                Some(res) = tasks.join_next() => {
                     match res {
-                        QueueCommand::Requeue(msg) => {
+                        Ok(ConsumerSendResult::Requeue(msg, consumer_id)) => {
+                            log::debug!("Received requeue msg {:?}", &msg);
                             m_requeue.inc();
                             messages.push_front(msg);
+                            m_consumers.dec();
+                            consumers.remove(&consumer_id);
                         }
-                        QueueCommand::ConsumeStart(consumer) => {
+                        Ok(ConsumerSendResult::RequeueAck(msg)) => {
+                            log::debug!("Received requeue ack msg {:?}", &msg);
+                            m_requeue.inc();
+                            unack.remove(&msg.id, true);
+                            messages.push_front(msg);
+                        }
+                        Ok(ConsumerSendResult::Consumer(consumer_id)) => {
                             m_sent.inc();
-                            if consumer.q.send(Response::StartConsume(name.clone())).await.is_ok() {
-                                waiters.push_back(consumer);
-                            };
+                            waiters.push_back(consumer_id);
                         }
-                        QueueCommand::GracefulShutdown => {
+                        Ok(ConsumerSendResult::GracefulShutdown) => {
                             if task_tracker.is_closed() {
                                 if messages.is_empty() {
-                                    for w in waiters.iter() {
-                                        consumers.remove(&w.id);
-                                        let _ = w.q.send(Response::GracefulShutdown(name.clone())).await;
+                                    for consumer_id in waiters.iter() {
+                                        if let Some(consumer) = consumers.remove(consumer_id) {
+                                            let _ = consumer.send_resp(Response::GracefulShutdown(name.clone())).await;
+                                        }
                                     }
                                     if consumers.is_empty() {
                                         log::info!("Shutdown queue {} without messages", &name);
@@ -212,27 +281,20 @@ impl Queue {
                                 }
                             }
                         }
-                        _ => log::error!("unreachable"),
+                        Err(e) => {
+                            log::error!("Error in task queue {}", e);
+                        }
                     };
                 }
             }
             while !messages.is_empty() && !waiters.is_empty() {
-                if let Some(consumer) = waiters.pop_front() {
-                    if consumers.contains(&consumer.id) {
+                if let Some(consumer_id) = waiters.pop_front() {
+                    if let Some(consumer) = consumers.get_mut(&consumer_id) {
                         if let Some(msg) = messages.pop_front() {
                             m_messages.set(messages.len() as f64);
-                            let qtx = qtx.clone();
-                            tasks.spawn(async move {
-                                let qmsg = QueueMessage {
-                                    message: msg.clone(),
-                                    queue: qtx,
-                                };
-                                let resp = Response::Message(qmsg);
-                                match consumer.q.send(resp).await {
-                                    Ok(_) => QueueCommand::ConsumeStart(consumer),
-                                    Err(_) => QueueCommand::Requeue(msg),
-                                }
-                            });
+                            if let Some(msg) = consumer.send(msg, &mut tasks, &mut unack) {
+                                messages.push_front(msg);
+                            }
                         }
                     }
                 }

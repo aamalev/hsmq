@@ -21,7 +21,7 @@ prost-types = "0.12.4"
 serde = { version = "1.0.197", features = ["derive"] }
 tokio = { version = "1.37.0", features = ["macros", "rt-multi-thread", "signal"] }
 tokio-stream = "0.1.15"
-tokio-util = { version = "0.7.10", features = ["rt"] }
+tokio-util = { version = "0.7.10", features = ["rt", "time"] }
 toml = "0.8.12"
 tonic = "0.11.0"
 uuid = { version = "1.8.0", features = ["v4", "v7"] }
