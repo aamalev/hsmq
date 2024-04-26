@@ -42,7 +42,7 @@ pub enum Response {
 #[derive(Debug)]
 pub struct Subscription {
     broadcast: broadcast::Sender<Arc<Envelop>>,
-    subs: Vec<mpsc::Sender<QueueCommand>>,
+    subs: Vec<GenericQueue>,
 }
 
 impl Default for Subscription {
@@ -58,8 +58,8 @@ impl Subscription {
         Self { broadcast, subs }
     }
 
-    fn subscribe(&mut self, queue: &Queue) {
-        self.subs.push(queue.tx.clone());
+    fn subscribe(&mut self, queue: GenericQueue) {
+        self.subs.push(queue.clone());
     }
 
     pub async fn send(&self, msg: Envelop) {
@@ -154,13 +154,33 @@ pub enum QueueCommand {
     ConsumeStop(Uuid),
 }
 
-#[derive(Clone, Debug)]
-pub struct Queue {
+#[tonic::async_trait]
+pub trait Queue: Debug {
+    fn get_name(&self) -> String;
+    async fn send(&self, cmd: QueueCommand) -> Result<(), GenericError>;
+}
+
+pub type GenericQueue = Arc<Box<dyn Queue + Send + Sync + 'static>>;
+
+#[derive(Debug)]
+pub struct NativeQueue {
     pub name: String,
     tx: mpsc::Sender<QueueCommand>,
 }
 
-impl Queue {
+#[tonic::async_trait]
+impl Queue for NativeQueue {
+    fn get_name(&self) -> String {
+        self.name.clone()
+    }
+
+    async fn send(&self, cmd: QueueCommand) -> Result<(), GenericError> {
+        self.tx.send(cmd).await?;
+        Ok(())
+    }
+}
+
+impl NativeQueue {
     fn new(cfg: config::Queue, task_tracker: TaskTracker) -> Self {
         let (tx, rx) = mpsc::channel(99);
         let name = cfg.name.clone();
@@ -168,9 +188,8 @@ impl Queue {
         Self { name, tx }
     }
 
-    pub async fn send(&self, cmd: QueueCommand) -> Result<(), GenericError> {
-        self.tx.send(cmd).await?;
-        Ok(())
+    fn new_generic(cfg: config::Queue, task_tracker: TaskTracker) -> GenericQueue {
+        Arc::new(Box::new(Self::new(cfg, task_tracker)))
     }
 
     async fn processing(
@@ -306,20 +325,20 @@ impl Queue {
 #[derive(Default)]
 pub struct HsmqServer {
     pub subscriptions: BTreeMap<String, Subscription>,
-    pub queues: HashMap<String, Queue>,
+    pub queues: HashMap<String, GenericQueue>,
     pub task_tracker: TaskTracker,
 }
 
 impl HsmqServer {
     pub fn from(config: Config, task_tracker: TaskTracker) -> Self {
         let mut subscriptions = BTreeMap::new();
-        let mut queues = HashMap::new();
+        let mut queues: HashMap<String, GenericQueue> = HashMap::new();
         for cfg_queue in config.queues {
             let name = cfg_queue.name.clone();
-            let q = Queue::new(cfg_queue.clone(), task_tracker.clone());
+            let q = NativeQueue::new_generic(cfg_queue.clone(), task_tracker.clone());
             for topic in cfg_queue.topics {
                 let sub = subscriptions.entry(topic).or_insert_with(Subscription::new);
-                sub.subscribe(&q);
+                sub.subscribe(q.clone());
             }
             queues.insert(name, q);
         }
