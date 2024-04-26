@@ -59,7 +59,7 @@ impl Subscription {
     }
 
     fn subscribe(&mut self, queue: GenericQueue) {
-        self.subs.push(queue.clone());
+        self.subs.push(queue);
     }
 
     pub async fn send(&self, msg: Envelop) {
