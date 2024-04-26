@@ -36,12 +36,44 @@ pub struct User {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(untagged)]
+pub enum Duration {
+    Days { d: f32 },
+    Hours { h: f32 },
+    Minutes { m: f32 },
+    SecondsFloat(f32),
+    Seconds { s: f32 },
+    MilliSeconds { ms: u64 },
+}
+
+impl Default for Duration {
+    fn default() -> Self {
+        Duration::Seconds { s: 60.0 }
+    }
+}
+
+impl From<Duration> for std::time::Duration {
+    fn from(d: Duration) -> std::time::Duration {
+        match d {
+            Duration::Days {d } => std::time::Duration::from_secs_f32(d * 24.0 * 60.0 * 60.0),
+            Duration::Hours { h } => std::time::Duration::from_secs_f32(h * 60.0 * 60.0),
+            Duration::Minutes { m } => std::time::Duration::from_secs_f32(m * 60.0),
+            Duration::SecondsFloat(s) => std::time::Duration::from_secs_f32(s),
+            Duration::Seconds { s } => std::time::Duration::from_secs_f32(s),
+            Duration::MilliSeconds { ms } => std::time::Duration::from_millis(ms),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct Queue {
     pub name: String,
     #[serde(default)]
     pub topics: Vec<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub ack_timeout: Duration,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]

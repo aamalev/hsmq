@@ -202,7 +202,7 @@ impl NativeQueue {
         let mut consumers: HashMap<Uuid, GenericConsumer> = HashMap::new();
         let mut waiters = VecDeque::new();
         let mut messages = VecDeque::new();
-        let mut unack = UnAck::new(name.clone(), Duration::from_secs(60));
+        let mut unack = UnAck::new(name.clone(), cfg.ack_timeout.into());
         let m_received = metrics::QUEUE_COUNTER.with_label_values(&[&name, "received"]);
         let m_sent = metrics::QUEUE_COUNTER.with_label_values(&[&name, "sent"]);
         let m_requeue = metrics::QUEUE_COUNTER.with_label_values(&[&name, "requeue"]);
