@@ -134,11 +134,12 @@ impl UnAck {
 pub trait Consumer: Debug {
     fn get_id(&self) -> Uuid;
     fn send(
-        &self,
+        &mut self,
         msg: Arc<Envelop>,
         tasks: &mut JoinSet<ConsumerSendResult>,
         unack: &mut UnAck,
     ) -> Option<Arc<Envelop>>;
+    fn ack(&mut self, msg_id: String, unack: &mut UnAck);
     async fn send_resp(&self, resp: Response) -> Result<(), GenericError>;
     async fn stop(&self);
 }
@@ -232,9 +233,13 @@ impl NativeQueue {
                             }
                             m_messages.set(messages.len() as f64);
                         }
-                        QueueCommand::MsgAck(msg_id, _consumer_id) => {
+                        QueueCommand::MsgAck(msg_id, consumer_id) => {
                             log::debug!("Received ack {:?}", &msg_id);
-                            unack.remove(&msg_id, false);
+                            if let Some(consumer) = consumers.get_mut(&consumer_id) {
+                                consumer.ack(msg_id, &mut unack);
+                            } else {
+                                unack.remove(&msg_id, false);
+                            }
                         }
                         QueueCommand::Requeue(msg) => {
                             m_requeue.inc();

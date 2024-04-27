@@ -34,6 +34,11 @@ message SubscriptionResponse {
     }
 }
 
+message SubscribeQueue {
+    repeated string queue = 1;
+    int32 prefetch_count = 2;
+}
+
 message MessageWithId {
     Message message = 1;
     string id = 2;
@@ -51,7 +56,7 @@ message MessageRequeue {
 
 message Request {
     oneof kind {
-        SubscribeQueueRequest subscribe_queue = 1;
+        SubscribeQueue subscribe_queue = 1;
         MessageAck message_ack = 2;
         MessageRequeue message_requeue = 3;
     }

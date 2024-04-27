@@ -66,6 +66,9 @@ enum Command {
 enum StreaminCommand {
     /// Subscribe to queue
     SubscribeQueue {
+        /// Prefetch count
+        #[arg(short, long, default_value_t = 1)]
+        prefetch_count: i32,
         /// Queues
         #[command()]
         queues: Vec<String>,
@@ -166,9 +169,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Received {}", count);
         }
         Command::Streaming { command } => match command {
-            StreaminCommand::SubscribeQueue { queues } => {
+            StreaminCommand::SubscribeQueue {
+                queues,
+                prefetch_count,
+            } => {
                 let (tx, rx) = mpsc::channel(1);
-                let cmd = SubscribeQueueRequest { queue: queues };
+                let cmd = pb::SubscribeQueue {
+                    queue: queues,
+                    prefetch_count,
+                };
                 let kind = Some(pb::request::Kind::SubscribeQueue(cmd));
                 let req = pb::Request { kind };
                 tx.send(req).await.unwrap();
