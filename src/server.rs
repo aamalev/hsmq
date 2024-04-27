@@ -115,7 +115,11 @@ impl UnAck {
         self.m_unacked.inc();
         id
     }
-    fn remove(&mut self, id: &String, requeue: bool) -> Option<delay_queue::Expired<Arc<Envelop>>> {
+    pub fn remove(
+        &mut self,
+        id: &String,
+        requeue: bool,
+    ) -> Option<delay_queue::Expired<Arc<Envelop>>> {
         if let Some(key) = self.unacked_map.remove(id) {
             if let Some(exp) = self.delay.try_remove(&key) {
                 self.m_unacked.dec();
