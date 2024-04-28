@@ -34,11 +34,14 @@ impl GrpcService {
         let task_tracker = self.task_tracker.clone();
         let svc = hsmq_server::HsmqServer::with_interceptor(hsmq, check_auth);
         log::info!("Run grpc on {:?}", &self.addr);
-        TonicServer::builder()
+        if let Err(e) = TonicServer::builder()
             .add_service(svc)
             .serve_with_shutdown(self.addr, async move { task_tracker.wait().await })
             .await
-            .unwrap();
+        {
+            self.task_tracker.close();
+            log::error!("Critical error with gRPC serve: {:?}", e);
+        };
         log::info!("Stopped");
     }
 }

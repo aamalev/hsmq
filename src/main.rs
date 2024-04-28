@@ -94,15 +94,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match tokio::signal::unix::signal(s) {
             Ok(mut res) => {
                 tokio::select! {
-                    res = ctrl_c(true) => res,
+                    _ = ctrl_c(true) => (),
                     _ = res.recv() => {
                         log::info!("Graceful shutdown by signal TERM");
                     }
+                    _ = task_tracker.wait() => (),
                 }
             }
             Err(_) => {
                 log::error!("Failed to install signal handler");
-                ctrl_c(true).await;
+                tokio::select! {
+                    _ = ctrl_c(true) => (),
+                    _ = task_tracker.wait() => (),
+                }
             }
         }
     };
