@@ -55,7 +55,7 @@ impl Default for Duration {
 impl From<Duration> for std::time::Duration {
     fn from(d: Duration) -> std::time::Duration {
         match d {
-            Duration::Days {d } => std::time::Duration::from_secs_f32(d * 24.0 * 60.0 * 60.0),
+            Duration::Days { d } => std::time::Duration::from_secs_f32(d * 24.0 * 60.0 * 60.0),
             Duration::Hours { h } => std::time::Duration::from_secs_f32(h * 60.0 * 60.0),
             Duration::Minutes { m } => std::time::Duration::from_secs_f32(m * 60.0),
             Duration::SecondsFloat(s) => std::time::Duration::from_secs_f32(s),
@@ -88,13 +88,22 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn from_file(path: &Path) -> Self {
-        let mut f = File::open(path).unwrap_or_else(|_| panic!("File not found {:?}", path));
+    pub fn from_file(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        match Self::load_file(path) {
+            Ok(cfg) => Ok(cfg),
+            Err(e) => {
+                log::error!("Error while load config {:?}", path);
+                Err(e)
+            }
+        }
+    }
+    fn load_file(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut f = File::open(path)?;
         let mut s = vec![];
-        f.read_to_end(&mut s).expect("Corrupted file");
-        let s = String::from_utf8(s).unwrap();
-        let result = toml::from_str(&s).expect("Toml is incorrect");
+        f.read_to_end(&mut s)?;
+        let s = String::from_utf8(s)?;
+        let result = toml::from_str(&s)?;
         log::debug!("Loaded: {:?}", &result);
-        result
+        Ok(result)
     }
 }

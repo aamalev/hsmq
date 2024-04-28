@@ -80,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut grpc_addr = "[::1]:4848".to_string();
 
     if let Some(config_path) = cli.config.as_deref() {
-        let cfg = Config::from_file(config_path);
+        let cfg = Config::from_file(config_path)?;
 
         if let Some(grpc_uri) = cli.grpc_uri {
             grpc_addr = grpc_uri.to_string();

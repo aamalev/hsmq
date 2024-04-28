@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     let cfg = if let Some(config_path) = cli.config.as_deref() {
-        Config::from_file(config_path)
+        Config::from_file(config_path)?
     } else {
         Config::default()
     };
