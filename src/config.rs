@@ -5,11 +5,26 @@ use std::io::Read;
 use std::net::SocketAddr;
 use std::path::Path;
 
+fn default_grpc_addr() -> Option<SocketAddr> {
+    "0.0.0.0:4848".parse().ok()
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct Node {
     pub name: Option<String>,
+    #[serde(default = "default_grpc_addr")]
     pub grpc_address: Option<SocketAddr>,
     pub http_address: Option<SocketAddr>,
+}
+
+impl Default for Node {
+    fn default() -> Self {
+        Self {
+            grpc_address: default_grpc_addr(),
+            name: None,
+            http_address: None,
+        }
+    }
 }
 
 fn default_metrics_path() -> String {
@@ -29,10 +44,20 @@ pub struct Cluster {
     pub udp_address: SocketAddr,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+pub struct JWT {
+    pub secrets: Vec<ResolvableValue>,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+pub struct Auth {
+    pub jwt: JWT,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct User {
     #[serde(default)]
-    pub tokens: Vec<String>,
+    pub tokens: Vec<ResolvableValue>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -78,13 +103,15 @@ pub struct Queue {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct Config {
-    pub node: Option<Node>,
+    pub node: Node,
     pub prometheus: Option<Prometheus>,
     pub cluster: Option<Cluster>,
     #[serde(default)]
     pub queues: Vec<Queue>,
     #[serde(default)]
-    pub users: HashMap<String, User>,
+    pub auth: Auth,
+    #[serde(default)]
+    pub user: HashMap<String, User>,
 }
 
 impl Config {
@@ -105,5 +132,65 @@ impl Config {
         let result = toml::from_str(&s)?;
         log::debug!("Loaded: {:?}", &result);
         Ok(result)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(untagged)]
+pub enum ResolvableValue {
+    Value(String),
+    Env {
+        #[serde(default)]
+        name: Option<String>,
+        env: String,
+        #[serde(default)]
+        default: Option<String>,
+        #[serde(default)]
+        disable: bool,
+    },
+}
+
+impl ResolvableValue {
+    pub fn get_name(&self) -> Option<String> {
+        match self {
+            ResolvableValue::Env { name, .. } => name.clone(),
+            _ => None,
+        }
+    }
+
+    pub fn resolve(&self) -> Option<String> {
+        match self {
+            ResolvableValue::Value(val) => Some(val.to_string()),
+            ResolvableValue::Env {
+                name,
+                env,
+                default,
+                disable,
+            } => {
+                if *disable {
+                    return None;
+                }
+                match std::env::var(env) {
+                    Ok(result) => Some(result),
+                    Err(_) => {
+                        if let Some(default) = default {
+                            Some(default.clone())
+                        } else {
+                            match name {
+                                Some(name) => log::error!("Expect value in {} for {}", env, name),
+                                _ => log::error!("Expect value in {}", env),
+                            };
+                            None
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl From<ResolvableValue> for String {
+    fn from(value: ResolvableValue) -> String {
+        value.resolve().unwrap_or_default()
     }
 }

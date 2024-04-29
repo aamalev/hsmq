@@ -24,8 +24,8 @@ Horizontal Scalable Message Queue Broker
     - [ ] TTL for messages
     - [ ] Dynamic queue with ttl
 - [x] Auth
-    - [ ] Tokens from config
-    - [ ] JWT
+    - [x] Tokens from config
+    - [x] JWT
 - [ ] Cluster
     - [ ] Static routes
     - [ ] DNS routes
