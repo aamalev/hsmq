@@ -1,0 +1,41 @@
+[node]
+# grpc_address = "[::1]:4848"  # IPv6
+grpc_address = "0.0.0.0:4848"  # IPv4
+
+[auth.jwt]
+secrets = [
+    "inline secret",
+    { env = "JWT_SECRET" },  # secret from environment variable
+]
+
+[cluster]
+name = "c1"
+udp_address = "0.0.0.0:4848"
+
+[prometheus]
+url = "/metrics"
+http_address = "0.0.0.0:8080"
+
+[[queues]]
+type = "InMemory"
+name = "a"
+limit = 99
+ack_timeout = {h = 4}
+topics = [
+    "a.b",
+]
+
+[[queues]]
+type = "InMemory"
+name = "b"
+limit = 99
+ack_timeout = 1
+topics = [
+    "b.a",
+]
+
+[user.malev]
+tokens = [
+    "inline personal token",
+    { env = "TOKEN" },  # token from environment variable
+]
