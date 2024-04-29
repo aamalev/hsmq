@@ -1,8 +1,10 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use http::uri::Uri;
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::{
+    collections::HashMap,
+    time::{Duration, SystemTime},
+};
 use tokio::sync::mpsc;
 use tonic::{
     codegen::{Body, Bytes, StdError},
@@ -73,7 +75,7 @@ impl Cli {
         let username = self
             .username
             .clone()
-            .unwrap_or_else(|| env!("USER").to_string());
+            .unwrap_or_else(|| std::env::var("USER").unwrap_or_default());
         let users = if let Some(user) = cfg.user.get(&username) {
             let mut result = HashMap::new();
             result.insert(username.clone(), user.clone());
@@ -94,7 +96,11 @@ impl Cli {
             if let Some(secret) = secret.resolve() {
                 let claims = Claims {
                     sub: username.clone(),
-                    exp: 100000000000000000,
+                    exp: (SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap()
+                        + Duration::from_secs(3600))
+                    .as_secs() as usize,
                 };
 
                 token = encode(
@@ -337,4 +343,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cli.run().await?;
 
     Ok(())
+}
+
+#[test]
+fn verify_cli() {
+    use clap::CommandFactory;
+    Cli::command().debug_assert()
 }

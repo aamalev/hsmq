@@ -103,7 +103,12 @@ impl Auth {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc, vec};
+    use std::{
+        collections::HashMap,
+        sync::Arc,
+        time::{Duration, SystemTime},
+        vec,
+    };
 
     use crate::config::{self, ResolvableValue};
 
@@ -136,7 +141,11 @@ mod tests {
     async fn jwt_decode_ok() {
         let secret = "secret".to_string();
         let mut claims = Claims::default();
-        claims.exp = 1000000000000000000;
+        claims.exp = (SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            + Duration::from_secs(3600))
+        .as_secs() as usize;
 
         let token = encode(
             &Header::default(),
