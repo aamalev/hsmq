@@ -91,7 +91,13 @@ impl From<Duration> for std::time::Duration {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-pub struct Queue {
+#[serde(tag = "type")]
+pub enum Queue {
+    InMemory(InMemoryQueue),
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct InMemoryQueue {
     pub name: String,
     #[serde(default)]
     pub topics: Vec<String>,
