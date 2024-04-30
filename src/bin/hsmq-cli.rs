@@ -242,7 +242,7 @@ impl Command {
         T::ResponseBody: Body<Data = Bytes> + Send + 'static,
         <T::ResponseBody as Body>::Error: Into<StdError> + Send,
     {
-        let s = SubscribeQueueRequest { queue: queues };
+        let s = SubscribeQueueRequest { queues };
         let mut stream = client.subscribe_queue(s).await?.into_inner();
         let mut count = 0u64;
 
@@ -270,6 +270,9 @@ enum StreaminCommand {
         /// Queues
         #[command()]
         queues: Vec<String>,
+        /// Prefetch count
+        #[arg(short, long, default_value_t = 1)]
+        prefetch_count: i32,
     },
 }
 
@@ -282,8 +285,8 @@ impl StreaminCommand {
         <T::ResponseBody as Body>::Error: Into<StdError> + Send,
     {
         match self {
-            StreaminCommand::SubscribeQueue { queues } => {
-                self.subscribe_queue(client, queues.clone()).await?
+            StreaminCommand::SubscribeQueue { queues, prefetch_count } => {
+                self.subscribe_queue(client, queues.clone(), *prefetch_count).await?
             }
         };
         Ok(())
@@ -293,6 +296,7 @@ impl StreaminCommand {
         &self,
         mut client: HsmqClient<T>,
         queues: Vec<String>,
+        prefetch_count: i32,
     ) -> Result<(), Box<dyn std::error::Error>>
     where
         T: tonic::client::GrpcService<tonic::body::BoxBody>,
@@ -301,8 +305,9 @@ impl StreaminCommand {
         <T::ResponseBody as Body>::Error: Into<StdError> + Send,
     {
         let (tx, rx) = mpsc::channel(1);
-        let cmd = SubscribeQueueRequest {
-            queue: queues.clone(),
+        let cmd = pb::SubscribeQueue {
+            queues,
+            prefetch_count,
         };
         let kind = Some(pb::request::Kind::SubscribeQueue(cmd));
         let req = pb::Request { kind };

@@ -90,6 +90,10 @@ impl From<Duration> for std::time::Duration {
     }
 }
 
+fn default_prefetch_count() -> usize {
+    1
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(tag = "type")]
 pub enum Queue {
@@ -105,6 +109,8 @@ pub struct InMemoryQueue {
     pub limit: Option<usize>,
     #[serde(default)]
     pub ack_timeout: Duration,
+    #[serde(default = "default_prefetch_count")]
+    pub prefetch_count: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]

@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::{error::Error, io::ErrorKind};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tokio_util::task::task_tracker::TaskTracker;
@@ -57,6 +57,7 @@ struct GrpcConsumer<T> {
     m_consume_ok: GenericCounter<AtomicF64>,
     m_consume_err: GenericCounter<AtomicF64>,
     m_buffer: GenericGauge<AtomicF64>,
+    prefetch_semaphore: Arc<Semaphore>,
 }
 
 impl<T> GrpcConsumer<T> {
@@ -65,11 +66,12 @@ impl<T> GrpcConsumer<T> {
         out_tx: mpsc::Sender<Result<T, Status>>,
         in_tx: mpsc::UnboundedSender<server::Response>,
         q: server::GenericQueue,
+        prefetch_count: usize,
     ) -> Self {
         let m_buffer = metrics::GRPC_GAUGE.with_label_values(&["buffer"]);
         let m_consume_ok = metrics::GRPC_COUNTER.with_label_values(&["consume", "ok"]);
         let m_consume_err = metrics::GRPC_COUNTER.with_label_values(&["consume", "error"]);
-
+        let prefetch_semaphore = Arc::new(Semaphore::new(prefetch_count));
         Self {
             id,
             out_tx,
@@ -78,6 +80,7 @@ impl<T> GrpcConsumer<T> {
             m_buffer,
             m_consume_ok,
             m_consume_err,
+            prefetch_semaphore,
         }
     }
     fn new_box(
@@ -85,8 +88,9 @@ impl<T> GrpcConsumer<T> {
         out_tx: mpsc::Sender<Result<T, Status>>,
         in_tx: mpsc::UnboundedSender<server::Response>,
         q: server::GenericQueue,
+        prefetch_count: usize,
     ) -> Box<Self> {
-        Box::new(Self::new(id, out_tx, in_tx, q))
+        Box::new(Self::new(id, out_tx, in_tx, q, prefetch_count))
     }
 }
 
@@ -96,7 +100,7 @@ impl Consumer for GrpcConsumer<pb::SubscriptionResponse> {
         self.id
     }
     fn send(
-        &self,
+        &mut self,
         msg: Arc<Envelop>,
         tasks: &mut JoinSet<ConsumerSendResult>,
         _unack: &mut server::UnAck,
@@ -120,6 +124,7 @@ impl Consumer for GrpcConsumer<pb::SubscriptionResponse> {
         });
         None
     }
+    fn ack(&mut self, _msg_id: String, _unack: &mut server::UnAck) {}
     async fn send_resp(&self, resp: server::Response) -> Result<(), GenericError> {
         self.in_tx.send(resp)?;
         self.m_buffer.inc();
@@ -139,7 +144,7 @@ impl Consumer for GrpcConsumer<pb::Response> {
         self.id
     }
     fn send(
-        &self,
+        &mut self,
         msg: Arc<Envelop>,
         tasks: &mut JoinSet<ConsumerSendResult>,
         unack: &mut server::UnAck,
@@ -150,6 +155,8 @@ impl Consumer for GrpcConsumer<pb::Response> {
         let queue = self.q.get_name();
         let m_consume_err = self.m_consume_err.clone();
         let m_consume_ok = self.m_consume_ok.clone();
+        let sem = self.prefetch_semaphore.clone();
+        sem.forget_permits(1);
         tasks.spawn(async move {
             let message = Some(msg.message.clone());
             let message = MessageWithId { message, id, queue };
@@ -161,10 +168,15 @@ impl Consumer for GrpcConsumer<pb::Response> {
                 ConsumerSendResult::RequeueAck(msg)
             } else {
                 m_consume_ok.inc();
+                let _permit = sem.acquire().await;
                 ConsumerSendResult::Consumer(consumer_id)
             }
         });
         None
+    }
+    fn ack(&mut self, msg_id: String, unack: &mut server::UnAck) {
+        self.prefetch_semaphore.add_permits(1);
+        unack.remove(&msg_id, false);
     }
     async fn send_resp(&self, resp: server::Response) -> Result<(), GenericError> {
         self.in_tx.send(resp)?;
@@ -253,18 +265,19 @@ impl hsmq_server::Hsmq for HsmqServer {
         log::info!(
             "Subscribe queue {:?} {:?}",
             req.remote_addr(),
-            req.local_addr()
+            req.local_addr(),
         );
         let sqr = req.into_inner();
         let consumer_id = Uuid::now_v7();
 
-        for queue_name in sqr.queue.iter() {
+        for queue_name in sqr.queues.iter() {
             if let Some(queue) = self.queues.get(queue_name) {
                 let consumer = GrpcConsumer::new_box(
                     consumer_id,
                     response_tx.clone(),
                     server_tx.clone(),
                     queue.clone(),
+                    0,
                 );
                 let cmd = QueueCommand::ConsumeStart(consumer);
                 match queue.send(cmd).await {
@@ -387,14 +400,18 @@ impl GrpcStreaming {
 
     async fn req_kind(&mut self, kind: pb::request::Kind) -> Result<(), GenericError> {
         match kind {
-            pb::request::Kind::SubscribeQueue(pb::SubscribeQueueRequest { queue }) => {
-                for queue_name in queue.iter() {
+            pb::request::Kind::SubscribeQueue(pb::SubscribeQueue {
+                queues,
+                prefetch_count,
+            }) => {
+                for queue_name in queues.iter() {
                     if let Some(queue) = self.queues.get(queue_name) {
                         let consumer = GrpcConsumer::new_box(
                             self.consumer_id,
                             self.out_tx.clone(),
                             self.server_tx.clone(),
                             queue.clone(),
+                            prefetch_count as usize,
                         );
                         let cmd = QueueCommand::ConsumeStart(consumer);
                         queue.send(cmd).await?;
