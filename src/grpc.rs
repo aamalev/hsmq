@@ -156,7 +156,7 @@ impl Consumer for GrpcConsumer<pb::Response> {
         let m_consume_err = self.m_consume_err.clone();
         let m_consume_ok = self.m_consume_ok.clone();
         let sem = self.prefetch_semaphore.clone();
-        sem.add_permits(1);
+        sem.forget_permits(1);
         tasks.spawn(async move {
             let message = Some(msg.message.clone());
             let message = MessageWithId { message, id, queue };
@@ -175,7 +175,7 @@ impl Consumer for GrpcConsumer<pb::Response> {
         None
     }
     fn ack(&mut self, msg_id: String, unack: &mut server::UnAck) {
-        self.prefetch_semaphore.forget_permits(1);
+        self.prefetch_semaphore.add_permits(1);
         unack.remove(&msg_id, false);
     }
     async fn send_resp(&self, resp: server::Response) -> Result<(), GenericError> {
