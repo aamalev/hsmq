@@ -24,8 +24,8 @@ Horizontal Scalable Message Queue Broker
     - [ ] TTL for messages
     - [ ] Dynamic queue with ttl
 - [x] Auth
-    - [ ] Tokens from config
-    - [ ] JWT
+    - [x] Tokens
+    - [x] JWT
 - [ ] Cluster
     - [ ] Static routes
     - [ ] DNS routes
@@ -36,10 +36,69 @@ Horizontal Scalable Message Queue Broker
 ## Message life cycle
 
 Message contains:
-    
+
     - data
     - headers
     - topic
 
 After publication, messages are filtered by topic.
 If the topic satisfies the condition, the message is saved in the queue.
+
+## Queues
+
+### InMemory
+
+```toml
+[[queues]]
+type = "InMemory"
+name = "b"
+limit = 99  # oldest messages will be drop with metric label "drop-limit"
+ack_timeout = 1  # in seconds, or use { m = 3 } to specify 3 minutes
+topics = [
+    "b.a",  # all messages with topic "b.a" will be kept to queue "b"
+]
+```
+
+
+## Auth
+
+### JWT
+
+Your secrets must be kept to config:
+
+```toml
+[auth.jwt]
+secrets = [
+    "inline secret",
+    { env = "JWT_SECRET" },  # secret from environment variable
+    { name = "old_secret_2", env = "OLD_JWT_2" },  # name for metrics
+    { name = "old_secret_1", env = "OLD_JWT_1", disable = true },
+]
+```
+
+You must specify a header in each request:
+
+    authorization: Bearer {jwt-token}
+
+Required claims with token:
+
+* exp - deadline unix timestamp
+* sub - username
+
+
+### Tokens
+
+Your tokens must be kept to config for each user:
+
+```toml
+[users.my_username]
+tokens = [
+    "inline personal token",
+    { env = "TOKEN" },  # token from environment variable
+    { env = "TOKEN_1", disable = true },
+]
+```
+
+You must specify a header in each request:
+
+    authorization: Bearer {token}

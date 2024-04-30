@@ -10,4 +10,6 @@ lazy_static! {
         register_counter_vec!("hsmq_grpc_total", "gRPC events", &["event", "reason"]).unwrap();
     pub static ref GRPC_GAUGE: GaugeVec =
         register_gauge_vec!("hsmq_grpc", "gRPC metrics", &["m"]).unwrap();
+    pub static ref JWT_COUNTER: CounterVec =
+        register_counter_vec!("hsmq_jwt_total", "JWT auth", &["name"]).unwrap();
 }

@@ -87,7 +87,7 @@ pub enum ConsumerSendResult {
 }
 
 pub struct UnAck {
-    delay: DelayQueue<Arc<Envelop>>,
+    pub delay: DelayQueue<Arc<Envelop>>,
     unacked_map: HashMap<String, delay_queue::Key>,
     m_unacked: GenericGauge<AtomicF64>,
     m_ack_after: GenericGauge<AtomicF64>,
@@ -95,7 +95,7 @@ pub struct UnAck {
 }
 
 impl UnAck {
-    fn new(queue_name: String, timeout: Duration) -> Self {
+    pub fn new(queue_name: String, timeout: Duration) -> Self {
         let delay = DelayQueue::new();
         let unacked_map = HashMap::new();
         let m_unacked = metrics::QUEUE_GAUGE.with_label_values(&[&queue_name, "unacked"]);
@@ -168,13 +168,13 @@ pub trait Queue: Debug {
 pub type GenericQueue = Arc<Box<dyn Queue + Send + Sync + 'static>>;
 
 #[derive(Debug)]
-pub struct NativeQueue {
+pub struct InMemoryQueue {
     pub name: String,
     tx: mpsc::Sender<QueueCommand>,
 }
 
 #[tonic::async_trait]
-impl Queue for NativeQueue {
+impl Queue for InMemoryQueue {
     fn get_name(&self) -> String {
         self.name.clone()
     }
@@ -185,20 +185,20 @@ impl Queue for NativeQueue {
     }
 }
 
-impl NativeQueue {
-    fn new(cfg: config::Queue, task_tracker: TaskTracker) -> Self {
+impl InMemoryQueue {
+    fn new(cfg: config::InMemoryQueue, task_tracker: TaskTracker) -> Self {
         let (tx, rx) = mpsc::channel(99);
         let name = cfg.name.clone();
         task_tracker.spawn(Self::processing(cfg, rx, task_tracker.clone()));
         Self { name, tx }
     }
 
-    fn new_generic(cfg: config::Queue, task_tracker: TaskTracker) -> GenericQueue {
+    fn new_generic(cfg: config::InMemoryQueue, task_tracker: TaskTracker) -> GenericQueue {
         Arc::new(Box::new(Self::new(cfg, task_tracker)))
     }
 
     async fn processing(
-        cfg: config::Queue,
+        cfg: config::InMemoryQueue,
         mut rx: mpsc::Receiver<QueueCommand>,
         task_tracker: TaskTracker,
     ) {
@@ -343,13 +343,17 @@ impl HsmqServer {
         let mut subscriptions = BTreeMap::new();
         let mut queues: HashMap<String, GenericQueue> = HashMap::new();
         for cfg_queue in config.queues {
-            let name = cfg_queue.name.clone();
-            let q = NativeQueue::new_generic(cfg_queue.clone(), task_tracker.clone());
-            for topic in cfg_queue.topics {
-                let sub = subscriptions.entry(topic).or_insert_with(Subscription::new);
-                sub.subscribe(q.clone());
-            }
-            queues.insert(name, q);
+            match cfg_queue {
+                config::Queue::InMemory(cfg_queue) => {
+                    let name = cfg_queue.name.clone();
+                    let q = InMemoryQueue::new_generic(cfg_queue.clone(), task_tracker.clone());
+                    for topic in cfg_queue.topics {
+                        let sub = subscriptions.entry(topic).or_insert_with(Subscription::new);
+                        sub.subscribe(q.clone());
+                    }
+                    queues.insert(name, q);
+                }
+            };
         }
         log::debug!("Created {:?}", &subscriptions);
         Self {

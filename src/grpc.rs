@@ -1,3 +1,4 @@
+use crate::auth::Auth;
 use crate::errors::GenericError;
 use crate::metrics::{self, GRPC_COUNTER};
 use crate::pb::{
@@ -16,7 +17,7 @@ use tokio::task::JoinSet;
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tokio_util::task::task_tracker::TaskTracker;
 use tonic::Streaming;
-use tonic::{metadata::MetadataValue, transport::Server as TonicServer, Request, Response, Status};
+use tonic::{transport::Server as TonicServer, Request, Response, Status};
 use uuid::Uuid;
 
 type HsmqResult<T> = Result<Response<T>, Status>;
@@ -30,15 +31,19 @@ impl GrpcService {
     pub fn new(addr: SocketAddr, task_tracker: TaskTracker) -> Self {
         Self { addr, task_tracker }
     }
-    pub async fn run(&self, hsmq: HsmqServer) {
+    pub async fn run(&self, hsmq: HsmqServer, auth: Arc<Auth>) {
         let task_tracker = self.task_tracker.clone();
-        let svc = hsmq_server::HsmqServer::with_interceptor(hsmq, check_auth);
+        let svc =
+            hsmq_server::HsmqServer::with_interceptor(hsmq, move |req| auth.grpc_check_auth(req));
         log::info!("Run grpc on {:?}", &self.addr);
-        TonicServer::builder()
+        if let Err(e) = TonicServer::builder()
             .add_service(svc)
             .serve_with_shutdown(self.addr, async move { task_tracker.wait().await })
             .await
-            .unwrap();
+        {
+            self.task_tracker.close();
+            log::error!("Critical error with gRPC serve: {:?}", e);
+        };
         log::info!("Stopped");
     }
 }
@@ -428,18 +433,6 @@ impl GrpcStreaming {
     }
 }
 
-fn check_auth(req: Request<()>) -> Result<Request<()>, Status> {
-    let token: MetadataValue<_> = "Bearer some-secret-token".parse().unwrap();
-
-    match req.metadata().get("authorization") {
-        Some(t) if token == t => Ok(req),
-        a => Err(Status::unauthenticated(format!(
-            "No valid auth token {:?} {:?}",
-            a, token
-        ))),
-    }
-}
-
 fn match_for_io_error(err_status: &Status) -> Option<&std::io::Error> {
     let mut err: &(dyn Error + 'static) = err_status;
 
@@ -465,11 +458,8 @@ fn match_for_io_error(err_status: &Status) -> Option<&std::io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::check_auth;
     use crate::pb::{hsmq_server::Hsmq, Message};
     use crate::server::{HsmqServer, Subscription};
-
-    const TOKEN: &str = "Bearer some-secret-token";
 
     #[tokio::test]
     async fn srv_publish_no_subs() {
@@ -488,22 +478,6 @@ mod tests {
         let msg = Message::default();
         let req = tonic::Request::new(msg);
         let result = srv.publish(req).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn check_auth_deny() {
-        let req = tonic::Request::new(());
-        let result = check_auth(req);
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn check_auth_allow() {
-        let token: tonic::metadata::MetadataValue<_> = TOKEN.parse().unwrap();
-        let mut req = tonic::Request::new(());
-        req.metadata_mut().insert("authorization", token.clone());
-        let result = check_auth(req);
         assert!(result.is_ok());
     }
 }
