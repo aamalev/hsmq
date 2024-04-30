@@ -1,6 +1,7 @@
 pub mod pb {
     tonic::include_proto!("hsmq.v1");
 }
+pub mod auth;
 pub mod cluster;
 pub mod config;
 pub mod errors;
@@ -11,7 +12,9 @@ pub mod web;
 
 use clap::{command, Parser};
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use crate::auth::Auth;
 use config::Config;
 use server::HsmqServer;
 
@@ -51,21 +54,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let task_tracker = tokio_util::task::task_tracker::TaskTracker::new();
 
-    let mut grpc_addr = "[::1]:4848".parse().unwrap();
-
-    if let Some(ref node) = cfg.node {
-        if let Some(addr) = &node.grpc_address {
-            grpc_addr = *addr;
-        }
-    };
+    let grpc_addr = cfg.node.grpc_address.unwrap();
 
     let hsmq = HsmqServer::from(cfg.clone(), task_tracker.clone());
+    let auth = Arc::new(Auth::new(cfg.auth.clone(), cfg.users.clone()));
 
     let mut tasks = tokio::task::JoinSet::new();
 
     let grpc_srv = grpc::GrpcService::new(grpc_addr, task_tracker.clone());
     tasks.spawn(async move {
-        grpc_srv.run(hsmq).await;
+        grpc_srv.run(hsmq, auth).await;
     });
 
     if let Some(ref prometheus) = cfg.prometheus {
@@ -128,4 +126,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[test]
+fn verify_cli() {
+    use clap::CommandFactory;
+    Cli::command().debug_assert()
 }
