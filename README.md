@@ -24,7 +24,7 @@ Horizontal Scalable Message Queue Broker
     - [ ] TTL for messages
     - [ ] Dynamic queue with ttl
 - [x] Auth
-    - [x] Tokens from config
+    - [x] Tokens
     - [x] JWT
 - [ ] Cluster
     - [ ] Static routes
@@ -36,10 +36,36 @@ Horizontal Scalable Message Queue Broker
 ## Message life cycle
 
 Message contains:
-    
+
     - data
     - headers
     - topic
 
 After publication, messages are filtered by topic.
 If the topic satisfies the condition, the message is saved in the queue.
+
+
+## Auth
+
+### JWT
+
+Your secrets must be kept to config:
+
+```toml
+[auth.jwt]
+secrets = [
+    "inline secret",
+    { env = "JWT_SECRET" },  # secret from environment variable
+    { name = "old_secret_2", env = "OLD_JWT_2" },  # name for metrics
+    { name = "old_secret_1", env = "OLD_JWT_1", disable = true },
+]
+```
+
+You must specify a header in each request:
+
+    authorization: Bearer {jwt-token}
+
+Required claims with token:
+
+* exp - deadline unix timestamp
+* sub - username
