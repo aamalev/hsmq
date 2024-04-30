@@ -24,7 +24,7 @@ message Redirect {
 }
 
 message SubscribeQueueRequest {
-    repeated string queue = 1;
+    repeated string queues = 1;
 }
 
 message SubscriptionResponse {
@@ -35,7 +35,7 @@ message SubscriptionResponse {
 }
 
 message SubscribeQueue {
-    repeated string queue = 1;
+    repeated string queues = 1;
     int32 prefetch_count = 2;
 }
 

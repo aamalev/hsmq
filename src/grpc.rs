@@ -270,7 +270,7 @@ impl hsmq_server::Hsmq for HsmqServer {
         let sqr = req.into_inner();
         let consumer_id = Uuid::now_v7();
 
-        for queue_name in sqr.queue.iter() {
+        for queue_name in sqr.queues.iter() {
             if let Some(queue) = self.queues.get(queue_name) {
                 let consumer = GrpcConsumer::new_box(
                     consumer_id,
@@ -401,10 +401,10 @@ impl GrpcStreaming {
     async fn req_kind(&mut self, kind: pb::request::Kind) -> Result<(), GenericError> {
         match kind {
             pb::request::Kind::SubscribeQueue(pb::SubscribeQueue {
-                queue,
+                queues,
                 prefetch_count,
             }) => {
-                for queue_name in queue.iter() {
+                for queue_name in queues.iter() {
                     if let Some(queue) = self.queues.get(queue_name) {
                         let consumer = GrpcConsumer::new_box(
                             self.consumer_id,

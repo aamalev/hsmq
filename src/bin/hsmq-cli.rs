@@ -242,7 +242,7 @@ impl Command {
         T::ResponseBody: Body<Data = Bytes> + Send + 'static,
         <T::ResponseBody as Body>::Error: Into<StdError> + Send,
     {
-        let s = SubscribeQueueRequest { queue: queues };
+        let s = SubscribeQueueRequest { queues };
         let mut stream = client.subscribe_queue(s).await?.into_inner();
         let mut count = 0u64;
 
@@ -306,7 +306,7 @@ impl StreaminCommand {
     {
         let (tx, rx) = mpsc::channel(1);
         let cmd = pb::SubscribeQueue {
-            queue: queues.clone(),
+            queues,
             prefetch_count,
         };
         let kind = Some(pb::request::Kind::SubscribeQueue(cmd));
