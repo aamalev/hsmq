@@ -44,6 +44,21 @@ Message contains:
 After publication, messages are filtered by topic.
 If the topic satisfies the condition, the message is saved in the queue.
 
+## Queues
+
+### InMemory
+
+```toml
+[[queues]]
+type = "InMemory"
+name = "b"
+limit = 99  # oldest messages will be drop with metric label "drop-limit"
+ack_timeout = 1  # in seconds, or use { m = 3 } to specify 3 minutes
+topics = [
+    "b.a",  # all messages with topic "b.a" will be kept to queue "b"
+]
+```
+
 
 ## Auth
 
