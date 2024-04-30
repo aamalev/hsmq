@@ -34,7 +34,7 @@ topics = [
     "b.a",
 ]
 
-[user.malev]
+[users.my_username]
 tokens = [
     "inline personal token",
     { env = "TOKEN" },  # token from environment variable

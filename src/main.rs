@@ -57,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let grpc_addr = cfg.node.grpc_address.unwrap();
 
     let hsmq = HsmqServer::from(cfg.clone(), task_tracker.clone());
-    let auth = Arc::new(Auth::new(cfg.auth.clone(), cfg.user.clone()));
+    let auth = Arc::new(Auth::new(cfg.auth.clone(), cfg.users.clone()));
 
     let mut tasks = tokio::task::JoinSet::new();
 

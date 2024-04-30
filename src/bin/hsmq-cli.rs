@@ -76,12 +76,12 @@ impl Cli {
             .username
             .clone()
             .unwrap_or_else(|| std::env::var("USER").unwrap_or_default());
-        let users = if let Some(user) = cfg.user.get(&username) {
+        let users = if let Some(user) = cfg.users.get(&username) {
             let mut result = HashMap::new();
             result.insert(username.clone(), user.clone());
             result
         } else {
-            cfg.user.clone()
+            cfg.users.clone()
         };
 
         let mut token = None;

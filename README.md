@@ -69,3 +69,21 @@ Required claims with token:
 
 * exp - deadline unix timestamp
 * sub - username
+
+
+### Tokens
+
+Your tokens must be kept to config for each user:
+
+```toml
+[users.my_username]
+tokens = [
+    "inline personal token",
+    { env = "TOKEN" },  # token from environment variable
+    { env = "TOKEN_1", disable = true },
+]
+```
+
+You must specify a header in each request:
+
+    authorization: Bearer {token}

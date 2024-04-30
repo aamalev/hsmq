@@ -111,7 +111,7 @@ pub struct Config {
     #[serde(default)]
     pub auth: Auth,
     #[serde(default)]
-    pub user: HashMap<String, User>,
+    pub users: HashMap<String, User>,
 }
 
 impl Config {
