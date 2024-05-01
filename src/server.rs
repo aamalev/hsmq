@@ -113,13 +113,15 @@ impl UnAck {
     pub fn remove(&mut self, id: &String, requeue: bool) -> Option<Arc<Envelop>> {
         if let Some(msg) = self.unacked.remove(id) {
             self.m_unacked.dec();
-            return Some(msg);
-        } else if requeue {
-            self.m_unacked.dec();
+            Some(msg)
         } else {
-            self.m_ack_after.inc();
-        };
-        None
+            if requeue {
+                self.m_unacked.dec();
+            } else {
+                self.m_ack_after.inc();
+            };
+            None
+        }
     }
 }
 
