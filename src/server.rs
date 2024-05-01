@@ -10,9 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinSet;
-use tokio_stream::StreamExt;
 use tokio_util::task::task_tracker::TaskTracker;
-use tokio_util::time::delay_queue::{self, DelayQueue};
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -83,26 +81,24 @@ pub enum ConsumerSendResult {
     Consumer(Uuid),
     Requeue(Arc<Envelop>, Uuid),
     RequeueAck(Arc<Envelop>),
+    AckTimeout(Arc<Envelop>),
     GracefulShutdown,
 }
 
 pub struct UnAck {
-    pub delay: DelayQueue<Arc<Envelop>>,
-    unacked_map: HashMap<String, delay_queue::Key>,
+    unacked: HashMap<String, Arc<Envelop>>,
     m_unacked: GenericGauge<AtomicF64>,
     m_ack_after: GenericGauge<AtomicF64>,
-    timeout: Duration,
+    pub timeout: Duration,
 }
 
 impl UnAck {
     pub fn new(queue_name: String, timeout: Duration) -> Self {
-        let delay = DelayQueue::new();
-        let unacked_map = HashMap::new();
+        let unacked = HashMap::new();
         let m_unacked = metrics::QUEUE_GAUGE.with_label_values(&[&queue_name, "unacked"]);
         let m_ack_after = metrics::QUEUE_GAUGE.with_label_values(&[&queue_name, "ack-after"]);
         Self {
-            delay,
-            unacked_map,
+            unacked,
             m_unacked,
             m_ack_after,
             timeout,
@@ -110,27 +106,22 @@ impl UnAck {
     }
     pub fn insert(&mut self, value: Arc<Envelop>) -> String {
         let id = value.id.clone();
-        let key = self.delay.insert(value, self.timeout);
-        self.unacked_map.insert(id.clone(), key);
+        self.unacked.insert(id.clone(), value);
         self.m_unacked.inc();
         id
     }
-    pub fn remove(
-        &mut self,
-        id: &String,
-        requeue: bool,
-    ) -> Option<delay_queue::Expired<Arc<Envelop>>> {
-        if let Some(key) = self.unacked_map.remove(id) {
-            if let Some(exp) = self.delay.try_remove(&key) {
-                self.m_unacked.dec();
-                return Some(exp);
-            } else if requeue {
+    pub fn remove(&mut self, id: &String, requeue: bool) -> Option<Arc<Envelop>> {
+        if let Some(msg) = self.unacked.remove(id) {
+            self.m_unacked.dec();
+            Some(msg)
+        } else {
+            if requeue {
                 self.m_unacked.dec();
             } else {
                 self.m_ack_after.inc();
-            }
+            };
+            None
         }
-        None
     }
 }
 
@@ -265,13 +256,6 @@ impl InMemoryQueue {
                         }
                     };
                 }
-                Some(expired) = unack.delay.next() => {
-                    let msg = expired.into_inner();
-                    m_ack_timeout.inc();
-                    unack.remove(&msg.id, true);
-                    messages.push_front(msg);
-                    m_messages.set(messages.len() as f64);
-                }
                 Some(res) = tasks.join_next() => {
                     match res {
                         Ok(ConsumerSendResult::Requeue(msg, consumer_id)) => {
@@ -286,6 +270,13 @@ impl InMemoryQueue {
                             m_requeue.inc();
                             unack.remove(&msg.id, true);
                             messages.push_front(msg);
+                            m_messages.set(messages.len() as f64);
+                        }
+                        Ok(ConsumerSendResult::AckTimeout(msg)) => {
+                            m_ack_timeout.inc();
+                            unack.remove(&msg.id, true);
+                            messages.push_front(msg);
+                            m_messages.set(messages.len() as f64);
                         }
                         Ok(ConsumerSendResult::Consumer(consumer_id)) => {
                             m_sent.inc();

@@ -155,6 +155,7 @@ impl Consumer for GrpcConsumer<pb::Response> {
         let queue = self.q.get_name();
         let m_consume_err = self.m_consume_err.clone();
         let m_consume_ok = self.m_consume_ok.clone();
+        let timeout = unack.timeout;
         let sem = self.prefetch_semaphore.clone();
         sem.forget_permits(1);
         tasks.spawn(async move {
@@ -168,8 +169,10 @@ impl Consumer for GrpcConsumer<pb::Response> {
                 ConsumerSendResult::RequeueAck(msg)
             } else {
                 m_consume_ok.inc();
-                let _permit = sem.acquire().await;
-                ConsumerSendResult::Consumer(consumer_id)
+                tokio::select! {
+                    _ = sem.acquire() => ConsumerSendResult::Consumer(consumer_id),
+                    _ = tokio::time::sleep(timeout) => ConsumerSendResult::AckTimeout(msg),
+                }
             }
         });
         None
