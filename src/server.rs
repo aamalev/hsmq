@@ -414,6 +414,18 @@ impl HsmqServer {
                     }
                     queues.insert(name, q);
                 }
+                config::Queue::RedisStream(cfg_queue) => {
+                    let name = cfg_queue.name.clone();
+                    let q = crate::redis::stream::RedisStreamQueue::new_generic(
+                        cfg_queue.clone(),
+                        task_tracker.clone(),
+                    );
+                    for topic in cfg_queue.topics {
+                        let sub = subscriptions.entry(topic).or_insert_with(Subscription::new);
+                        sub.subscribe(q.clone());
+                    }
+                    queues.insert(name, q);
+                }
             };
         }
         log::debug!("Created {:?}", &subscriptions);
