@@ -17,12 +17,17 @@ use uuid::Uuid;
 pub struct Envelop {
     pub message: Message,
     pub id: String,
+    pub shard: String,
 }
 
 impl Envelop {
     pub fn new(message: Message) -> Self {
         let id = Uuid::now_v7().to_string();
-        Self { message, id }
+        Self {
+            message,
+            id,
+            shard: String::default(),
+        }
     }
 
     pub fn gen_msg_id(&self) -> Uuid {
@@ -128,6 +133,7 @@ impl UnAck {
 #[tonic::async_trait]
 pub trait Consumer: Debug {
     fn get_id(&self) -> Uuid;
+    fn is_ackable(&self) -> bool;
     fn send(
         &mut self,
         msg: Arc<Envelop>,
@@ -144,7 +150,7 @@ pub type GenericConsumer = Box<dyn Consumer + Send + Sync + 'static>;
 
 pub enum QueueCommand {
     Msg(Arc<Envelop>),
-    MsgAck(String, Uuid),
+    MsgAck(String, String, Uuid),
     Requeue(Arc<Envelop>),
     ConsumeStart(GenericConsumer),
     ConsumeStop(Uuid),
@@ -228,7 +234,7 @@ impl InMemoryQueue {
                             }
                             m_messages.set(messages.len() as f64);
                         }
-                        QueueCommand::MsgAck(msg_id, consumer_id) => {
+                        QueueCommand::MsgAck(msg_id, _, consumer_id) => {
                             log::debug!("Received ack {:?}", &msg_id);
                             if let Some(consumer) = consumers.get_mut(&consumer_id) {
                                 consumer.ack(msg_id, &mut unack);

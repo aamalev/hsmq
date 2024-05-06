@@ -8,7 +8,7 @@ message Message {
     google.protobuf.Any data = 1;
     string topic = 2;
     string key = 3;
-    map<string, string> headers = 5;
+    map<string, string> headers = 4;
 }
 
 message PublishResponse {
@@ -39,19 +39,23 @@ message SubscribeQueue {
     int32 prefetch_count = 2;
 }
 
-message MessageWithId {
+message MessageMeta {
+    string id = 1;
+    string queue = 2;
+    string shard = 3;
+}
+
+message MessageWithMeta {
     Message message = 1;
-    string id = 2;
-    string queue = 3;
+    MessageMeta meta = 2;
 }
 
 message MessageAck {
-    string msg_id = 1;
-    string queue = 2;
+    MessageMeta meta = 1;
 }
 
 message MessageRequeue {
-    string msg_id = 1;
+    MessageMeta meta = 1;
 }
 
 message Request {
@@ -64,7 +68,7 @@ message Request {
 
 message Response {
     oneof kind {
-        MessageWithId message = 1;
+        MessageWithMeta message = 1;
         Redirect redirect = 2;
     }
 }

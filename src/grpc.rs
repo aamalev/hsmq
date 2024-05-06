@@ -2,8 +2,8 @@ use crate::auth::Auth;
 use crate::errors::GenericError;
 use crate::metrics::{self, GRPC_COUNTER};
 use crate::pb::{
-    self, hsmq_server, publish_response, subscription_response, Message, MessageWithId,
-    PublishResponse, SubscribeQueueRequest, SubscriptionResponse,
+    self, hsmq_server, publish_response, subscription_response, Message, PublishResponse,
+    SubscribeQueueRequest, SubscriptionResponse,
 };
 use crate::server::{self, Consumer, ConsumerSendResult, Envelop, HsmqServer, QueueCommand};
 use prometheus::core::{AtomicF64, GenericCounter, GenericGauge};
@@ -99,6 +99,9 @@ impl Consumer for GrpcConsumer<pb::SubscriptionResponse> {
     fn get_id(&self) -> uuid::Uuid {
         self.id
     }
+    fn is_ackable(&self) -> bool {
+        false
+    }
     fn send(
         &mut self,
         msg: Arc<Envelop>,
@@ -143,6 +146,9 @@ impl Consumer for GrpcConsumer<pb::Response> {
     fn get_id(&self) -> uuid::Uuid {
         self.id
     }
+    fn is_ackable(&self) -> bool {
+        true
+    }
     fn send(
         &mut self,
         msg: Arc<Envelop>,
@@ -151,6 +157,7 @@ impl Consumer for GrpcConsumer<pb::Response> {
     ) -> Option<Arc<Envelop>> {
         let consumer_id = self.id;
         let id = unack.insert(msg.clone());
+        let shard = msg.shard.clone();
         let out_tx = self.out_tx.clone();
         let queue = self.q.get_name();
         let m_consume_err = self.m_consume_err.clone();
@@ -160,7 +167,8 @@ impl Consumer for GrpcConsumer<pb::Response> {
         sem.forget_permits(1);
         tasks.spawn(async move {
             let message = Some(msg.message.clone());
-            let message = MessageWithId { message, id, queue };
+            let meta = Some(pb::MessageMeta { id, queue, shard });
+            let message = pb::MessageWithMeta { message, meta };
             let resp = pb::Response {
                 kind: Some(pb::response::Kind::Message(message)),
             };
@@ -422,9 +430,11 @@ impl GrpcStreaming {
                     }
                 }
             }
-            pb::request::Kind::MessageAck(pb::MessageAck { msg_id, queue }) => {
+            pb::request::Kind::MessageAck(pb::MessageAck {
+                meta: Some(pb::MessageMeta { id, queue, shard }),
+            }) => {
                 if let Some(queue) = self.queues.get(&queue) {
-                    let cmd = QueueCommand::MsgAck(msg_id, self.consumer_id);
+                    let cmd = QueueCommand::MsgAck(id, shard, self.consumer_id);
                     if let Err(e) = queue.send(cmd).await {
                         log::error!("Unexpected queue error {:?}", e);
                     };
