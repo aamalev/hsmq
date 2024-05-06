@@ -212,7 +212,7 @@ impl RedisStream {
             .arg(&self.cfg.group)
             .arg(&id)
             .to_owned();
-        log::error!("Ack with cmd: {}", cmd_to_string(cmd.clone()));
+        log::debug!("Ack with cmd: {}", cmd_to_string(cmd.clone()));
         match self.execute(cmd).await {
             Ok(true | false) => RedisResult::Acked {
                 stream: self,
@@ -491,7 +491,7 @@ impl RedisStreamQueue {
                 stream,
                 consumer_id,
             } => {
-                log::error!("NoMessages {}", &stream.name);
+                log::debug!("NoMessages {}", &stream.name);
                 commands.spawn(stream.wait());
                 waiters.push_front(consumer_id);
             }
