@@ -98,6 +98,7 @@ fn default_prefetch_count() -> usize {
 #[serde(tag = "type")]
 pub enum Queue {
     InMemory(InMemoryQueue),
+    RedisStream(RedisStreamConfig),
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -111,6 +112,34 @@ pub struct InMemoryQueue {
     pub ack_timeout: Duration,
     #[serde(default = "default_prefetch_count")]
     pub prefetch_count: usize,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(untagged)]
+pub enum Shard {
+    String(String),
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct RedisStreamConfig {
+    pub name: String,
+    #[serde(default)]
+    pub topics: Vec<String>,
+    #[serde(default)]
+    pub maxlen: Option<usize>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub ack_timeout: Duration,
+    pub group: String,
+    #[serde(default)]
+    pub nomkstream: bool,
+    pub nodes: Vec<String>,
+    pub shards: Vec<Shard>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<ResolvableValue>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]

@@ -7,7 +7,9 @@ pub mod config;
 pub mod errors;
 pub mod grpc;
 pub mod metrics;
+pub mod redis;
 pub mod server;
+pub mod utils;
 pub mod web;
 
 use clap::{command, Parser};
