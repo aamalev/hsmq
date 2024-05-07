@@ -18,6 +18,7 @@ use crate::{
     server::{
         self, ConsumerSendResult, GenericConsumer, GenericQueue, QueueCommand, Response, UnAck,
     },
+    utils,
 };
 
 use super::create_client;
@@ -87,6 +88,11 @@ impl RedisStream {
             fail: 0,
             m_sleep,
         }
+    }
+
+    fn up(mut self) -> Self {
+        self.order_id = utils::current_time().as_secs_f64().to_string();
+        self
     }
 
     async fn execute<T>(&mut self, cmd: redis::Cmd) -> redis::RedisResult<T>
@@ -194,7 +200,7 @@ impl RedisStream {
             Ok(redis::Value::Nil) => {
                 self.fail += 1;
                 RedisResult::NoMessage {
-                    stream: self,
+                    stream: self.up(),
                     consumer_id,
                 }
             }
@@ -214,7 +220,7 @@ impl RedisStream {
     async fn wait(self) -> RedisResult {
         if self.fail > 3 {
             self.m_sleep.inc();
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
         RedisResult::Ready(self)
     }
@@ -341,10 +347,14 @@ impl RedisStreamQueue {
             match shard {
                 Shard::String(s) => {
                     let stream = RedisStream::new(connection.clone(), cfg.clone(), s.clone());
-                    writers.push_back(stream.clone());
-                    readers.push(stream);
+                    writers.push_back(stream);
                 }
             };
+        }
+        for _ in 0..3 {
+            for s in writers.iter() {
+                readers.push(s.clone().up());
+            }
         }
         let mut tasks = JoinSet::new();
         let mut commands = JoinSet::new();
