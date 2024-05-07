@@ -42,6 +42,7 @@ struct RedisStream {
     m_sleep: GenericCounter<AtomicF64>,
     m_xadd: GenericCounter<AtomicF64>,
     m_xread: GenericCounter<AtomicF64>,
+    m_xread_nil: GenericCounter<AtomicF64>,
     m_xack: GenericCounter<AtomicF64>,
 }
 
@@ -85,6 +86,7 @@ impl RedisStream {
         let m_sleep = metrics::REDIS_COUNTER.with_label_values(&[&name, "stream-sleep"]);
         let m_xadd = metrics::REDIS_COUNTER.with_label_values(&[&name, "XADD"]);
         let m_xread = metrics::REDIS_COUNTER.with_label_values(&[&name, "XREADGROUP"]);
+        let m_xread_nil = metrics::REDIS_COUNTER.with_label_values(&[&name, "XREADGROUP-NIL"]);
         let m_xack = metrics::REDIS_COUNTER.with_label_values(&[&name, "XACK"]);
         Self {
             order_id: String::default(),
@@ -95,6 +97,7 @@ impl RedisStream {
             m_sleep,
             m_xadd,
             m_xread,
+            m_xread_nil,
             m_xack,
         }
     }
@@ -210,6 +213,7 @@ impl RedisStream {
             }
             Ok(redis::Value::Nil) => {
                 self.fail += 1;
+                self.m_xread_nil.inc();
                 RedisResult::NoMessage {
                     stream: self.up(),
                     consumer_id,
@@ -242,7 +246,6 @@ impl RedisStream {
             .arg(&self.cfg.group)
             .arg(&id)
             .to_owned();
-        log::debug!("Ack with cmd: {}", cmd_to_string(cmd.clone()));
         self.m_xack.inc();
         match self.execute(cmd).await {
             Ok(true | false) => RedisResult::Acked {
