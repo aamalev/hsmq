@@ -5,6 +5,7 @@ use std::{
     time::Duration,
 };
 
+use prometheus::core::{AtomicF64, GenericCounter};
 use redis::aio::ConnectionLike;
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::task::TaskTracker;
@@ -36,6 +37,8 @@ struct RedisStream {
     connection: redis::cluster_async::ClusterConnection,
     cfg: RedisStreamConfig,
     name: String,
+    fail: usize,
+    m_sleep: GenericCounter<AtomicF64>,
 }
 
 impl PartialEq for RedisStream {
@@ -75,11 +78,14 @@ impl RedisStream {
         cfg: RedisStreamConfig,
         name: String,
     ) -> Self {
+        let m_sleep = metrics::REDIS_COUNTER.with_label_values(&[&name, "stream-sleep"]);
         Self {
             order_id: String::default(),
             connection,
             cfg,
             name,
+            fail: 0,
+            m_sleep,
         }
     }
 
@@ -173,6 +179,7 @@ impl RedisStream {
                             if let Some(redis::Value::Data(id)) = b.pop() {
                                 msg_id = String::from_utf8(id).unwrap_or_default();
                                 self.order_id = msg_id.clone();
+                                self.fail = 0;
                             }
                         }
                     }
@@ -184,10 +191,13 @@ impl RedisStream {
                     consumer_id,
                 }
             }
-            Ok(redis::Value::Nil) => RedisResult::NoMessage {
-                stream: self,
-                consumer_id,
-            },
+            Ok(redis::Value::Nil) => {
+                self.fail += 1;
+                RedisResult::NoMessage {
+                    stream: self,
+                    consumer_id,
+                }
+            }
             Ok(other) => RedisResult::Unexpected {
                 stream: self,
                 value: other,
@@ -202,7 +212,10 @@ impl RedisStream {
     }
 
     async fn wait(self) -> RedisResult {
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        if self.fail > 3 {
+            self.m_sleep.inc();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
         RedisResult::Ready(self)
     }
 
