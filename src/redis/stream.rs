@@ -40,6 +40,9 @@ struct RedisStream {
     name: String,
     fail: usize,
     m_sleep: GenericCounter<AtomicF64>,
+    m_xadd: GenericCounter<AtomicF64>,
+    m_xread: GenericCounter<AtomicF64>,
+    m_xack: GenericCounter<AtomicF64>,
 }
 
 impl PartialEq for RedisStream {
@@ -80,6 +83,9 @@ impl RedisStream {
         name: String,
     ) -> Self {
         let m_sleep = metrics::REDIS_COUNTER.with_label_values(&[&name, "stream-sleep"]);
+        let m_xadd = metrics::REDIS_COUNTER.with_label_values(&[&name, "XADD"]);
+        let m_xread = metrics::REDIS_COUNTER.with_label_values(&[&name, "XREADGROUP"]);
+        let m_xack = metrics::REDIS_COUNTER.with_label_values(&[&name, "XACK"]);
         Self {
             order_id: String::default(),
             connection,
@@ -87,6 +93,9 @@ impl RedisStream {
             name,
             fail: 0,
             m_sleep,
+            m_xadd,
+            m_xread,
+            m_xack,
         }
     }
 
@@ -126,6 +135,7 @@ impl RedisStream {
             cmd.arg(b"body").arg(&data.value);
             cmd.arg(b"content-type").arg(&data.type_url);
         }
+        self.m_xadd.inc();
         match self.execute::<String>(cmd).await {
             Ok(msg_id) => {
                 self.order_id = msg_id.clone();
@@ -153,6 +163,7 @@ impl RedisStream {
             cmd.arg(b"NOACK");
         }
         cmd.arg(b"STREAMS").arg(&self.name).arg(b">");
+        self.m_xread.inc();
         match self.connection.req_packed_command(&cmd).await {
             Ok(redis::Value::Bulk(mut b)) => {
                 let mut msg_id = String::default();
@@ -232,6 +243,7 @@ impl RedisStream {
             .arg(&id)
             .to_owned();
         log::debug!("Ack with cmd: {}", cmd_to_string(cmd.clone()));
+        self.m_xack.inc();
         match self.execute(cmd).await {
             Ok(true | false) => RedisResult::Acked {
                 stream: self,
