@@ -355,7 +355,9 @@ impl RedisStreamQueue {
             .inspect_err(|e| log::error!("Error connection {}", e))
             .unwrap();
         let name = cfg.name.clone();
+        let ack_timeout: Duration = cfg.ack_timeout.clone().into();
         let acker = RedisStream::new(connection.clone(), cfg.clone(), String::default());
+        let mut unack = HashMap::new();
         let mut writers = VecDeque::new();
         let mut readers = BinaryHeap::new();
         for shard in cfg.shards.iter() {
@@ -363,6 +365,7 @@ impl RedisStreamQueue {
                 Shard::String(s) => {
                     let stream = RedisStream::new(connection.clone(), cfg.clone(), s.clone());
                     writers.push_back(stream);
+                    unack.insert(s.clone(), UnAck::new(name.clone(), ack_timeout.clone()));
                 }
             };
         }
@@ -376,7 +379,6 @@ impl RedisStreamQueue {
         let mut consumers: HashMap<Uuid, GenericConsumer> = HashMap::new();
         let mut waiters = VecDeque::new();
         let mut messages = VecDeque::new();
-        let mut unack = UnAck::new(name.clone(), cfg.ack_timeout.clone().into());
         let m_received = metrics::QUEUE_COUNTER.with_label_values(&[&name, "received"]);
         let m_sent = metrics::QUEUE_COUNTER.with_label_values(&[&name, "sent"]);
         let m_requeue = metrics::QUEUE_COUNTER.with_label_values(&[&name, "requeue"]);
@@ -430,7 +432,6 @@ impl RedisStreamQueue {
                     Ok(rr) => Self::redis_result(
                         rr,
                         &mut readers,
-                        &mut writers,
                         &mut tasks,
                         &mut consumers,
                         &mut unack,
@@ -487,10 +488,9 @@ impl RedisStreamQueue {
     fn redis_result(
         rr: RedisResult,
         readers: &mut BinaryHeap<RedisStream>,
-        writers: &mut VecDeque<RedisStream>,
         tasks: &mut JoinSet<ConsumerSendResult>,
         consumers: &mut HashMap<Uuid, GenericConsumer>,
-        unack: &mut UnAck,
+        unack: &mut HashMap<String, UnAck>,
         waiters: &mut VecDeque<Uuid>,
         commands: &mut JoinSet<RedisResult>,
     ) {
@@ -510,16 +510,16 @@ impl RedisStreamQueue {
                 consumer_id,
             } => {
                 let shard = stream.name.clone();
+                let unack = unack.get_mut(&stream.name).unwrap();
                 readers.push(stream);
-                let msg = Arc::new(server::Envelop {
-                    message: msg,
-                    id: msg_id,
-                    shard,
-                });
+                let mut envelop = server::Envelop::new(msg);
+                envelop.meta.id = msg_id;
+                envelop.meta.shard = shard;
+                let msg = Arc::new(envelop);
                 waiters.push_front(consumer_id);
                 while let Some(consumer_id) = waiters.pop_front() {
                     if let Some(consumer) = consumers.get_mut(&consumer_id) {
-                        if let Some(msg) = consumer.send(msg.clone(), tasks, unack) {
+                        if let Some(_) = consumer.send(msg.clone(), tasks, unack) {
                             return;
                         }
                     }
@@ -548,10 +548,11 @@ impl RedisStreamQueue {
                 consumer_id: _,
             } => todo!(),
             RedisResult::Acked {
-                stream: _,
+                stream,
                 msg_id,
                 consumer_id,
             } => {
+                let unack = unack.get_mut(&stream.name).unwrap();
                 if let Some(consumer) = consumers.get_mut(&consumer_id) {
                     consumer.ack(msg_id, unack);
                 } else {
