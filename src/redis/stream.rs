@@ -39,6 +39,7 @@ struct RedisStream {
     cfg: RedisStreamConfig,
     name: String,
     fail: usize,
+    queue: String,
     m_sleep: GenericCounter<AtomicF64>,
     m_xadd: GenericCounter<AtomicF64>,
     m_xread: GenericCounter<AtomicF64>,
@@ -82,6 +83,7 @@ impl RedisStream {
         connection: redis::cluster_async::ClusterConnection,
         cfg: RedisStreamConfig,
         name: String,
+        queue: String,
     ) -> Self {
         let m_sleep = metrics::REDIS_COUNTER.with_label_values(&[&name, "stream-sleep"]);
         let m_xadd = metrics::REDIS_COUNTER.with_label_values(&[&name, "XADD"]);
@@ -93,6 +95,7 @@ impl RedisStream {
             connection,
             cfg,
             name,
+            queue,
             fail: 0,
             m_sleep,
             m_xadd,
@@ -363,7 +366,8 @@ impl RedisStreamQueue {
         for shard in cfg.shards.iter() {
             match shard {
                 Shard::String(s) => {
-                    let stream = RedisStream::new(connection.clone(), cfg.clone(), s.clone());
+                    let stream =
+                        RedisStream::new(connection.clone(), cfg.clone(), s.clone(), name.clone());
                     ackers.insert(s.clone(), stream.clone());
                     readers.push(stream.clone().up());
                     writers.push_back(stream);
@@ -508,12 +512,12 @@ impl RedisStreamQueue {
                 msg_id,
                 consumer_id,
             } => {
-                let shard = stream.name.clone();
                 let unack = unack.get_mut(&stream.name).unwrap();
-                readers.push(stream);
                 let mut envelop = server::Envelop::new(msg);
                 envelop.meta.id = msg_id;
-                envelop.meta.shard = shard;
+                envelop.meta.shard.clone_from(&stream.name);
+                envelop.meta.queue.clone_from(&stream.queue);
+                readers.push(stream);
                 let msg = Arc::new(envelop);
                 waiters.push_front(consumer_id);
                 while let Some(consumer_id) = waiters.pop_front() {
