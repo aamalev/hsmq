@@ -356,7 +356,7 @@ impl RedisStreamQueue {
             .unwrap();
         let name = cfg.name.clone();
         let ack_timeout: Duration = cfg.ack_timeout.clone().into();
-        let acker = RedisStream::new(connection.clone(), cfg.clone(), String::default());
+        let mut ackers = HashMap::new();
         let mut unack = HashMap::new();
         let mut writers = VecDeque::new();
         let mut readers = BinaryHeap::new();
@@ -364,6 +364,7 @@ impl RedisStreamQueue {
             match shard {
                 Shard::String(s) => {
                     let stream = RedisStream::new(connection.clone(), cfg.clone(), s.clone());
+                    ackers.insert(s.clone(), stream.clone());
                     writers.push_back(stream);
                     unack.insert(s.clone(), UnAck::new(name.clone(), ack_timeout.clone()));
                 }
@@ -405,7 +406,9 @@ impl RedisStreamQueue {
                         }
                         QueueCommand::MsgAck(msg_id, shard_id, consumer_id) => {
                             log::debug!("Received ack {:?}", &msg_id);
-                            commands.spawn(acker.clone().ack(shard_id, msg_id, consumer_id));
+                            if let Some(acker) = ackers.get(&shard_id) {
+                                commands.spawn(acker.clone().ack(shard_id, msg_id, consumer_id));
+                            }
                         }
                         QueueCommand::Requeue(msg) => {
                             m_requeue.inc();
