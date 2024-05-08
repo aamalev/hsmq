@@ -14,7 +14,7 @@ message Message {
 message PublishResponse {
     oneof kind {
         int64 count = 1;
-        string msg_id = 2;
+        MessageMeta message_meta = 2;
         Redirect redirect = 3;
     }
 }

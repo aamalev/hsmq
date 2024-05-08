@@ -156,10 +156,10 @@ impl Consumer for GrpcConsumer<pb::Response> {
         unack: &mut server::UnAck,
     ) -> Option<Arc<Envelop>> {
         let consumer_id = self.id;
-        let id = unack.insert(msg.clone());
-        let shard = msg.shard.clone();
+        unack.insert(msg.clone());
+        let mut meta = msg.meta.clone();
         let out_tx = self.out_tx.clone();
-        let queue = self.q.get_name();
+        meta.queue = self.q.get_name();
         let m_consume_err = self.m_consume_err.clone();
         let m_consume_ok = self.m_consume_ok.clone();
         let timeout = unack.timeout;
@@ -167,7 +167,7 @@ impl Consumer for GrpcConsumer<pb::Response> {
         sem.forget_permits(1);
         tasks.spawn(async move {
             let message = Some(msg.message.clone());
-            let meta = Some(pb::MessageMeta { id, queue, shard });
+            let meta = Some(meta);
             let message = pb::MessageWithMeta { message, meta };
             let resp = pb::Response {
                 kind: Some(pb::response::Kind::Message(message)),
@@ -210,12 +210,11 @@ impl hsmq_server::Hsmq for HsmqServer {
         }
         let message = request.into_inner();
         let topic = message.topic.clone();
-        let envelop = Envelop::new(message);
-        let msg_id = envelop.gen_msg_id().to_string();
+        let envelop = Envelop::new(message).with_generated_id();
         if let Some(subscription) = self.subscriptions.get(&topic) {
             GRPC_COUNTER.with_label_values(&["publish", "ok"]).inc();
+            let kind = Some(publish_response::Kind::MessageMeta(envelop.meta.clone()));
             subscription.send(envelop).await;
-            let kind = Some(publish_response::Kind::MsgId(msg_id));
             Ok(Response::new(PublishResponse { kind }))
         } else {
             GRPC_COUNTER.with_label_values(&["publish", "error"]).inc();

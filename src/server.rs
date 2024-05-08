@@ -1,7 +1,7 @@
 use crate::config::{self, Config};
 use crate::errors::GenericError;
 use crate::metrics;
-use crate::pb::Message;
+use crate::pb::{Message, MessageMeta};
 use prometheus::core::{AtomicF64, GenericGauge};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::Debug;
@@ -16,22 +16,20 @@ use uuid::Uuid;
 #[derive(Debug)]
 pub struct Envelop {
     pub message: Message,
-    pub id: String,
-    pub shard: String,
+    pub meta: MessageMeta,
 }
 
 impl Envelop {
     pub fn new(message: Message) -> Self {
-        let id = Uuid::now_v7().to_string();
         Self {
             message,
-            id,
-            shard: String::default(),
+            meta: MessageMeta::default(),
         }
     }
 
-    pub fn gen_msg_id(&self) -> Uuid {
-        Uuid::new_v4()
+    pub fn with_generated_id(mut self) -> Self {
+        self.meta.id = Uuid::now_v7().to_string();
+        self
     }
 }
 
@@ -110,7 +108,7 @@ impl UnAck {
         }
     }
     pub fn insert(&mut self, value: Arc<Envelop>) -> String {
-        let id = value.id.clone();
+        let id = value.meta.id.clone();
         self.unacked.insert(id.clone(), value);
         self.m_unacked.inc();
         id
@@ -274,13 +272,13 @@ impl InMemoryQueue {
                         Ok(ConsumerSendResult::RequeueAck(msg)) => {
                             log::debug!("Received requeue ack msg {:?}", &msg);
                             m_requeue.inc();
-                            unack.remove(&msg.id, true);
+                            unack.remove(&msg.meta.id, true);
                             messages.push_front(msg);
                             m_messages.set(messages.len() as f64);
                         }
                         Ok(ConsumerSendResult::AckTimeout(msg)) => {
                             m_ack_timeout.inc();
-                            unack.remove(&msg.id, true);
+                            unack.remove(&msg.meta.id, true);
                             messages.push_front(msg);
                             m_messages.set(messages.len() as f64);
                         }
