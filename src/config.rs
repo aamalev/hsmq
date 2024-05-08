@@ -116,7 +116,7 @@ pub struct InMemoryQueue {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(untagged)]
-pub enum Shard {
+pub enum Stream {
     String(String),
 }
 
@@ -134,12 +134,25 @@ pub struct RedisStreamConfig {
     pub group: String,
     #[serde(default)]
     pub nomkstream: bool,
+    pub streams: Vec<Stream>,
+    #[serde(default = "RedisStreamConfig::default_body_fieldname")]
+    pub body_fieldname: String,
+    #[serde(default = "RedisStreamConfig::default_readers_pool")]
+    pub readers_pool: usize,
     pub nodes: Vec<String>,
-    pub shards: Vec<Shard>,
     #[serde(default)]
     pub username: Option<String>,
     #[serde(default)]
     pub password: Option<ResolvableValue>,
+}
+
+impl RedisStreamConfig {
+    fn default_body_fieldname() -> String {
+        "body".to_string()
+    }
+    fn default_readers_pool() -> usize {
+        1
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]

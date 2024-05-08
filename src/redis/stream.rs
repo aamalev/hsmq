@@ -12,7 +12,7 @@ use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 use crate::{
-    config::{RedisStreamConfig, Shard},
+    config::{RedisStreamConfig, Stream},
     errors::GenericError,
     metrics, pb,
     server::{
@@ -39,7 +39,6 @@ struct RedisStream {
     cfg: RedisStreamConfig,
     name: String,
     fail: usize,
-    queue: String,
     m_sleep: GenericCounter<AtomicF64>,
     m_xadd: GenericCounter<AtomicF64>,
     m_xread: GenericCounter<AtomicF64>,
@@ -83,7 +82,6 @@ impl RedisStream {
         connection: redis::cluster_async::ClusterConnection,
         cfg: RedisStreamConfig,
         name: String,
-        queue: String,
     ) -> Self {
         let m_sleep = metrics::REDIS_COUNTER.with_label_values(&[&name, "stream-sleep"]);
         let m_xadd = metrics::REDIS_COUNTER.with_label_values(&[&name, "XADD"]);
@@ -95,7 +93,6 @@ impl RedisStream {
             connection,
             cfg,
             name,
-            queue,
             fail: 0,
             m_sleep,
             m_xadd,
@@ -138,7 +135,7 @@ impl RedisStream {
             cmd.arg(b"key").arg(&msg.message.key);
         }
         if let Some(ref data) = msg.message.data {
-            cmd.arg(b"body").arg(&data.value);
+            cmd.arg(&self.cfg.body_fieldname).arg(&data.value);
             cmd.arg(b"content-type").arg(&data.type_url);
         }
         self.m_xadd.inc();
@@ -190,7 +187,7 @@ impl RedisStream {
                                 if let Some(ct) = headers.remove("content-type") {
                                     data.type_url = String::from_utf8(ct).unwrap_or_default();
                                 }
-                                if let Some(body) = headers.remove("body") {
+                                if let Some(body) = headers.remove(&self.cfg.body_fieldname) {
                                     data.value = body;
                                 }
                                 msg.data = Some(data);
@@ -363,18 +360,18 @@ impl RedisStreamQueue {
         let mut unack = HashMap::new();
         let mut writers = VecDeque::new();
         let mut readers = BinaryHeap::new();
-        for shard in cfg.shards.iter() {
-            match shard {
-                Shard::String(s) => {
+        for stream_cfg in cfg.streams.iter() {
+            match stream_cfg {
+                Stream::String(s) => {
                     let stream =
-                        RedisStream::new(connection.clone(), cfg.clone(), s.clone(), name.clone());
+                        RedisStream::new(connection.clone(), cfg.clone(), s.clone());
                     ackers.insert(s.clone(), stream.clone());
                     writers.push_back(stream);
                     unack.insert(s.clone(), UnAck::new(name.clone(), ack_timeout.clone()));
                 }
             };
         }
-        for _ in 0..3 {
+        for _ in 0..cfg.readers_pool {
             for s in writers.iter() {
                 readers.push(s.clone().up());
             }
@@ -520,7 +517,7 @@ impl RedisStreamQueue {
                 let mut envelop = server::Envelop::new(msg);
                 envelop.meta.id = msg_id;
                 envelop.meta.shard.clone_from(&stream.name);
-                envelop.meta.queue.clone_from(&stream.queue);
+                envelop.meta.queue.clone_from(&stream.cfg.name);
                 readers.push(stream);
                 let msg = Arc::new(envelop);
                 waiters.push_front(consumer_id);
