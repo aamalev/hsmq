@@ -369,11 +369,15 @@ impl RedisStreamQueue {
                     let stream =
                         RedisStream::new(connection.clone(), cfg.clone(), s.clone(), name.clone());
                     ackers.insert(s.clone(), stream.clone());
-                    readers.push(stream.clone().up());
                     writers.push_back(stream);
                     unack.insert(s.clone(), UnAck::new(name.clone(), ack_timeout.clone()));
                 }
             };
+        }
+        for _ in 0..3 {
+            for s in writers.iter() {
+                readers.push(s.clone().up());
+            }
         }
         let mut tasks = JoinSet::new();
         let mut commands = JoinSet::new();
