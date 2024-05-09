@@ -4,7 +4,7 @@ use std::time::SystemTime;
 pub const CREATED_AT: &str = "created-at";
 
 pub fn repr(m: &Message) -> String {
-    let any = m.data.clone().unwrap();
+    let any = m.data.clone().unwrap_or_default();
     let now = SystemTime::now();
     let mut result = format!("Message(topic='{}'", m.topic);
 

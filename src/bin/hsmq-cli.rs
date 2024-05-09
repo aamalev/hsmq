@@ -319,10 +319,7 @@ impl StreaminCommand {
         while let Some(item) = stream.next().await {
             match item?.kind {
                 Some(pb::response::Kind::Message(msg)) => {
-                    let cmd = pb::MessageAck {
-                        msg_id: msg.id,
-                        queue: msg.queue,
-                    };
+                    let cmd = pb::MessageAck { meta: msg.meta };
                     let kind = Some(pb::request::Kind::MessageAck(cmd));
                     let req = pb::Request { kind };
                     tx.send(req).await.unwrap();
