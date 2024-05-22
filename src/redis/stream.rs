@@ -271,7 +271,7 @@ enum RedisResult {
         error: redis::RedisError,
     },
     Message {
-        stream: String,
+        stream: RedisStream,
         msg: pb::Message,
         msg_id: String,
         consumer_id: Uuid,
@@ -505,12 +505,12 @@ impl RedisStreamQueue {
                 msg_id,
                 consumer_id,
             } => {
-                let unack = unack.get_mut(&stream).unwrap();
+                let unack = unack.get_mut(&stream.name).unwrap();
                 let mut envelop = server::Envelop::new(msg);
                 envelop.meta.id = msg_id.clone();
-                envelop.meta.shard.clone_from(&stream);
-                if let Some(reader) = readers.get_mut(stream.as_str()) {
-                    envelop.meta.queue.clone_from(&reader.cfg.name);
+                envelop.meta.shard.clone_from(&stream.name);
+                envelop.meta.queue.clone_from(&stream.cfg.name);
+                if let Some(reader) = readers.get_mut(&stream.name) {
                     reader.order_id = msg_id;
                     reader.fail = 0;
                 }
