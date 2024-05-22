@@ -102,9 +102,13 @@ impl RedisStream {
         }
     }
 
-    fn up(mut self) -> Self {
-        self.order_id = utils::current_time().as_secs_f64().to_string();
+    fn with_now_order(mut self) -> Self {
+        self.up();
         self
+    }
+
+    fn up(&mut self) {
+        self.order_id = utils::current_time().as_secs_f64().to_string();
     }
 
     async fn execute<T>(&mut self, cmd: redis::Cmd) -> redis::RedisResult<T>
@@ -363,7 +367,7 @@ impl RedisStreamQueue {
             match stream_cfg {
                 Stream::String(s) => {
                     let stream = RedisStream::new(connection.clone(), cfg.clone(), s.clone());
-                    readers.insert(s.clone(), stream.clone().up());
+                    readers.insert(s.clone(), stream.clone().with_now_order());
                     writers.push_back(stream);
                     unack.insert(s.clone(), UnAck::new(name.clone(), ack_timeout));
                 }
@@ -472,8 +476,10 @@ impl RedisStreamQueue {
             if let Some(consumer_id) = waiters.pop_front() {
                 if let Some(consumer) = consumers.get_mut(&consumer_id) {
                     let noack = !consumer.is_ackable();
-                    if let Some(stream) = readers.values().min() {
-                        commands.spawn(stream.clone().fetch(noack, consumer_id));
+                    if let Some(reader) = readers.values().min() {
+                        let stream = reader.clone();
+                        readers.get_mut(&stream.name).map(|r| r.up());
+                        commands.spawn(stream.fetch(noack, consumer_id));
                     } else {
                         waiters.push_front(consumer_id);
                     }
@@ -536,13 +542,13 @@ impl RedisStreamQueue {
                         commands.spawn(reader.wait());
                     } else {
                         reader.fail += 1;
-                        readers.insert(stream, reader.up());
+                        readers.insert(stream, reader.with_now_order());
                     }
                 }
             }
             RedisResult::StreamNotFound(_stream) => todo!(),
             RedisResult::Ready(stream) => {
-                readers.insert(stream.name.clone(), stream.up());
+                readers.insert(stream.name.clone(), stream.with_now_order());
             }
             RedisResult::Unexpected {
                 stream: _,
