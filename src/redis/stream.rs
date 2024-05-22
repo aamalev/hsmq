@@ -198,8 +198,6 @@ impl RedisStream {
                             }
                             if let Some(redis::Value::Data(id)) = b.pop() {
                                 msg_id = String::from_utf8_lossy(&id).to_string();
-                                self.order_id = msg_id.clone();
-                                self.fail = 0;
                             }
                         }
                     }
@@ -212,7 +210,6 @@ impl RedisStream {
                 }
             }
             Ok(redis::Value::Nil) => {
-                self.fail += 1;
                 self.m_xread_nil.inc();
                 RedisResult::NoMessage {
                     stream: self.name,
@@ -234,7 +231,7 @@ impl RedisStream {
 
     async fn wait(self) -> RedisResult {
         self.m_sleep.inc();
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
         RedisResult::Ready(self)
     }
 
