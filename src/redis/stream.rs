@@ -236,7 +236,7 @@ impl RedisStream {
             x if x > 30 => tokio::time::sleep(Duration::from_millis(x as u64)).await,
             _ => {}
         }
-        RedisResult::Ready(self.up())
+        RedisResult::Ready(self)
     }
 
     async fn ack(mut self, stream: String, id: String, consumer_id: Uuid) -> RedisResult {
@@ -536,13 +536,13 @@ impl RedisStreamQueue {
                         commands.spawn(reader.wait());
                     } else {
                         reader.fail += 1;
-                        readers.insert(stream, reader);
+                        readers.insert(stream, reader.up());
                     }
                 }
             }
             RedisResult::StreamNotFound(_stream) => todo!(),
             RedisResult::Ready(stream) => {
-                readers.insert(stream.name.clone(), stream);
+                readers.insert(stream.name.clone(), stream.up());
             }
             RedisResult::Unexpected {
                 stream: _,
