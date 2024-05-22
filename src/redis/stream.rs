@@ -363,7 +363,7 @@ impl RedisStreamQueue {
             match stream_cfg {
                 Stream::String(s) => {
                     let stream = RedisStream::new(connection.clone(), cfg.clone(), s.clone());
-                    readers.insert(s.clone(), stream.clone());
+                    readers.insert(s.clone(), stream.clone().up());
                     writers.push_back(stream);
                     unack.insert(s.clone(), UnAck::new(name.clone(), ack_timeout));
                 }
