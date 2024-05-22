@@ -205,7 +205,7 @@ impl RedisStream {
                     }
                 }
                 RedisResult::Message {
-                    stream: self.name,
+                    stream: self,
                     msg,
                     msg_id,
                     consumer_id,
