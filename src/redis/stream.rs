@@ -1,5 +1,5 @@
 use std::{
-    collections::{BinaryHeap, HashMap, VecDeque},
+    collections::{HashMap, VecDeque},
     fmt::Display,
     sync::Arc,
     time::Duration,
@@ -205,7 +205,7 @@ impl RedisStream {
                     }
                 }
                 RedisResult::Message {
-                    stream: self,
+                    stream: self.name,
                     msg,
                     msg_id,
                     consumer_id,
@@ -215,7 +215,7 @@ impl RedisStream {
                 self.fail += 1;
                 self.m_xread_nil.inc();
                 RedisResult::NoMessage {
-                    stream: self.up(),
+                    stream: self.name,
                     consumer_id,
                 }
             }
@@ -233,10 +233,8 @@ impl RedisStream {
     }
 
     async fn wait(self) -> RedisResult {
-        if self.fail > 3 {
-            self.m_sleep.inc();
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        self.m_sleep.inc();
+        tokio::time::sleep(Duration::from_millis(20)).await;
         RedisResult::Ready(self)
     }
 
@@ -273,14 +271,14 @@ enum RedisResult {
         error: redis::RedisError,
     },
     Message {
-        stream: RedisStream,
+        stream: String,
         msg: pb::Message,
         msg_id: String,
         consumer_id: Uuid,
     },
     StreamNotFound(RedisStream),
     NoMessage {
-        stream: RedisStream,
+        stream: String,
         consumer_id: Uuid,
     },
     Ready(RedisStream),
@@ -307,7 +305,7 @@ enum RedisResult {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RedisStreamQueue {
     pub name: String,
     tx: mpsc::Sender<QueueCommand>,
@@ -356,24 +354,19 @@ impl RedisStreamQueue {
             .unwrap();
         let name = cfg.name.clone();
         let ack_timeout: Duration = cfg.ack_timeout.clone().into();
-        let mut ackers = HashMap::new();
         let mut unack = HashMap::new();
         let mut writers = VecDeque::new();
-        let mut readers = BinaryHeap::new();
+        let mut readers = HashMap::new();
+
         for stream_cfg in cfg.streams.iter() {
             match stream_cfg {
                 Stream::String(s) => {
                     let stream = RedisStream::new(connection.clone(), cfg.clone(), s.clone());
-                    ackers.insert(s.clone(), stream.clone());
+                    readers.insert(s.clone(), stream.clone());
                     writers.push_back(stream);
-                    unack.insert(s.clone(), UnAck::new(name.clone(), ack_timeout.clone()));
+                    unack.insert(s.clone(), UnAck::new(name.clone(), ack_timeout));
                 }
             };
-        }
-        for _ in 0..cfg.readers_pool {
-            for s in writers.iter() {
-                readers.push(s.clone().up());
-            }
         }
         let mut tasks = JoinSet::new();
         let mut commands = JoinSet::new();
@@ -406,7 +399,7 @@ impl RedisStreamQueue {
                         }
                         QueueCommand::MsgAck(msg_id, shard_id, consumer_id) => {
                             log::debug!("Received ack {:?}", &msg_id);
-                            if let Some(acker) = ackers.get(&shard_id) {
+                            if let Some(acker) = readers.get(&shard_id) {
                                 commands.spawn(acker.clone().ack(shard_id, msg_id, consumer_id));
                             }
                         }
@@ -478,8 +471,8 @@ impl RedisStreamQueue {
             if let Some(consumer_id) = waiters.pop_front() {
                 if let Some(consumer) = consumers.get_mut(&consumer_id) {
                     let noack = !consumer.is_ackable();
-                    if let Some(stream) = readers.pop() {
-                        commands.spawn(stream.fetch(noack, consumer_id));
+                    if let Some(stream) = readers.values().min() {
+                        commands.spawn(stream.clone().fetch(noack, consumer_id));
                     } else {
                         waiters.push_front(consumer_id);
                     }
@@ -490,7 +483,7 @@ impl RedisStreamQueue {
 
     fn redis_result(
         rr: RedisResult,
-        readers: &mut BinaryHeap<RedisStream>,
+        readers: &mut HashMap<String, RedisStream>,
         tasks: &mut JoinSet<ConsumerSendResult>,
         consumers: &mut HashMap<Uuid, GenericConsumer>,
         unack: &mut HashMap<String, UnAck>,
@@ -512,17 +505,20 @@ impl RedisStreamQueue {
                 msg_id,
                 consumer_id,
             } => {
-                let unack = unack.get_mut(&stream.name).unwrap();
+                let unack = unack.get_mut(&stream).unwrap();
                 let mut envelop = server::Envelop::new(msg);
-                envelop.meta.id = msg_id;
-                envelop.meta.shard.clone_from(&stream.name);
-                envelop.meta.queue.clone_from(&stream.cfg.name);
-                readers.push(stream);
+                envelop.meta.id = msg_id.clone();
+                envelop.meta.shard.clone_from(&stream);
+                if let Some(reader) = readers.get_mut(stream.as_str()) {
+                    envelop.meta.queue.clone_from(&reader.cfg.name);
+                    reader.order_id = msg_id;
+                    reader.fail = 0;
+                }
                 let msg = Arc::new(envelop);
                 waiters.push_front(consumer_id);
                 while let Some(consumer_id) = waiters.pop_front() {
                     if let Some(consumer) = consumers.get_mut(&consumer_id) {
-                        if let Some(_) = consumer.send(msg.clone(), tasks, unack) {
+                        if consumer.send(msg.clone(), tasks, unack).is_some() {
                             return;
                         }
                     }
@@ -532,13 +528,20 @@ impl RedisStreamQueue {
                 stream,
                 consumer_id,
             } => {
-                log::debug!("NoMessages {}", &stream.name);
-                commands.spawn(stream.wait());
+                log::debug!("NoMessages {}", &stream);
                 waiters.push_front(consumer_id);
+                if let Some(mut reader) = readers.remove(stream.as_str()) {
+                    if reader.fail > 5 {
+                        commands.spawn(reader.wait());
+                    } else {
+                        reader.fail += 1;
+                        readers.insert(stream, reader);
+                    }
+                }
             }
-            RedisResult::StreamNotFound(stream) => todo!(),
+            RedisResult::StreamNotFound(_stream) => todo!(),
             RedisResult::Ready(stream) => {
-                readers.push(stream);
+                readers.insert(stream.name.clone(), stream);
             }
             RedisResult::Unexpected {
                 stream: _,
