@@ -231,8 +231,12 @@ impl RedisStream {
 
     async fn wait(self) -> RedisResult {
         self.m_sleep.inc();
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        RedisResult::Ready(self)
+        match self.fail {
+            x if x > 99 => tokio::time::sleep(Duration::from_millis(1000)).await,
+            x if x > 30 => tokio::time::sleep(Duration::from_millis(x as u64 * 10)).await,
+            _ => {}
+        }
+        RedisResult::Ready(self.up())
     }
 
     async fn ack(mut self, stream: String, id: String, consumer_id: Uuid) -> RedisResult {
