@@ -476,7 +476,7 @@ impl RedisStreamQueue {
             if let Some(consumer_id) = waiters.pop_front() {
                 if let Some(consumer) = consumers.get_mut(&consumer_id) {
                     let noack = !consumer.is_ackable();
-                    if let Some(reader) = readers.values().min() {
+                    if let Some(reader) = readers.values().max() {
                         let stream = reader.clone();
                         readers.get_mut(&stream.name).map(|r| r.up());
                         commands.spawn(stream.fetch(noack, consumer_id));
