@@ -1,5 +1,5 @@
 use crate::config::{self, Config};
-use crate::errors::GenericError;
+use crate::errors::{GenericError, PublishMessageError, SendMessageError};
 use crate::metrics;
 use crate::pb::{Message, MessageMeta};
 use prometheus::core::{AtomicF64, GenericGauge};
@@ -63,10 +63,10 @@ impl Subscription {
         self.subs.push(queue);
     }
 
-    pub async fn send(&self, msg: Envelop) {
+    pub async fn publish(&self, msg: Envelop) {
         let msg = Arc::new(msg);
-        for qtx in self.subs.iter() {
-            if let Err(e) = qtx.send(QueueCommand::Msg(msg.clone())).await {
+        for q in self.subs.iter() {
+            if let Err(e) = q.publish(msg.clone()).await {
                 log::error!("Error send command {}", e);
             }
         }
@@ -132,12 +132,14 @@ impl UnAck {
 pub trait Consumer: Debug {
     fn get_id(&self) -> Uuid;
     fn is_ackable(&self) -> bool;
+    fn get_prefetch_count(&self) -> usize;
     fn send(
-        &mut self,
+        &self,
         msg: Arc<Envelop>,
         tasks: &mut JoinSet<ConsumerSendResult>,
         unack: &mut UnAck,
     ) -> Option<Arc<Envelop>>;
+    async fn send_message(&self, msg: Arc<Envelop>) -> Result<(), SendMessageError>;
     fn ack(&mut self, msg_id: String, unack: &mut UnAck);
     async fn send_resp(&self, resp: Response) -> Result<(), GenericError>;
     async fn stop(&self);
@@ -157,15 +159,58 @@ pub enum QueueCommand {
 #[tonic::async_trait]
 pub trait Queue: Debug {
     fn get_name(&self) -> String;
+    fn generic_clone(&self) -> GenericQueue;
+    async fn subscribe(&self, consumer: GenericConsumer)
+        -> Result<GenericSubscriber, GenericError>;
+    async fn publish(&self, msg: Arc<Envelop>) -> Result<(), PublishMessageError>;
+}
+
+impl Clone for GenericQueue {
+    fn clone(&self) -> Self {
+        self.generic_clone()
+    }
+}
+
+#[tonic::async_trait]
+pub trait Subscriber: Debug {
+    fn get_name(&self) -> String;
+    async fn ack(&mut self, id: String, shard: String) -> Result<(), GenericError>;
     async fn send(&self, cmd: QueueCommand) -> Result<(), GenericError>;
 }
 
-pub type GenericQueue = Arc<Box<dyn Queue + Send + Sync + 'static>>;
+pub type GenericSubscriber = Box<dyn Subscriber + Send + Sync + 'static>;
+pub type GenericQueue = Box<dyn Queue + Send + Sync + 'static>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct InMemoryQueue {
     pub name: String,
     tx: mpsc::Sender<QueueCommand>,
+}
+
+#[derive(Debug)]
+struct InMemorySubscriber {
+    name: String,
+    consumer_id: Uuid,
+    tx: mpsc::Sender<QueueCommand>,
+}
+
+#[tonic::async_trait]
+impl Subscriber for InMemorySubscriber {
+    fn get_name(&self) -> String {
+        self.name.clone()
+    }
+
+    async fn ack(&mut self, id: String, shard: String) -> Result<(), GenericError> {
+        Ok(self
+            .tx
+            .send(QueueCommand::MsgAck(id, shard, self.consumer_id))
+            .await?)
+    }
+
+    async fn send(&self, cmd: QueueCommand) -> Result<(), GenericError> {
+        self.tx.send(cmd).await?;
+        Ok(())
+    }
 }
 
 #[tonic::async_trait]
@@ -174,9 +219,30 @@ impl Queue for InMemoryQueue {
         self.name.clone()
     }
 
-    async fn send(&self, cmd: QueueCommand) -> Result<(), GenericError> {
-        self.tx.send(cmd).await?;
-        Ok(())
+    fn generic_clone(&self) -> GenericQueue {
+        Box::new(self.clone())
+    }
+
+    async fn publish(&self, msg: Arc<Envelop>) -> Result<(), PublishMessageError> {
+        Ok(self
+            .tx
+            .send(QueueCommand::Msg(msg))
+            .await
+            .map_err(|_| PublishMessageError)?)
+    }
+
+    async fn subscribe(
+        &self,
+        consumer: GenericConsumer,
+    ) -> Result<GenericSubscriber, GenericError> {
+        let result = InMemorySubscriber {
+            name: self.name.clone(),
+            consumer_id: consumer.get_id(),
+            tx: self.tx.clone(),
+        };
+        let cmd = QueueCommand::ConsumeStart(consumer);
+        result.send(cmd).await?;
+        Ok(Box::new(result))
     }
 }
 
@@ -189,7 +255,7 @@ impl InMemoryQueue {
     }
 
     fn new_generic(cfg: config::InMemoryQueue, task_tracker: TaskTracker) -> GenericQueue {
-        Arc::new(Box::new(Self::new(cfg, task_tracker)))
+        Box::new(Self::new(cfg, task_tracker))
     }
 
     async fn processing(
@@ -334,7 +400,7 @@ pub struct HsmqServer {
 }
 
 impl HsmqServer {
-    pub fn from(config: Config, task_tracker: TaskTracker) -> Self {
+    pub async fn from(config: Config, task_tracker: TaskTracker) -> Result<Self, GenericError> {
         let mut subscriptions = BTreeMap::new();
         let mut queues: HashMap<String, GenericQueue> = HashMap::new();
         for cfg_queue in config.queues {
@@ -351,10 +417,10 @@ impl HsmqServer {
             };
         }
         log::debug!("Created {:?}", &subscriptions);
-        Self {
+        Ok(Self {
             subscriptions,
             queues,
             task_tracker,
-        }
+        })
     }
 }

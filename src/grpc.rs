@@ -1,5 +1,5 @@
 use crate::auth::Auth;
-use crate::errors::GenericError;
+use crate::errors::{GenericError, SendMessageError};
 use crate::metrics::{self, GRPC_COUNTER};
 use crate::pb::{
     self, hsmq_server, publish_response, subscription_response, Message, PublishResponse,
@@ -49,15 +49,20 @@ impl GrpcService {
 }
 
 #[derive(Debug)]
-struct GrpcConsumer<T> {
-    id: uuid::Uuid,
-    out_tx: mpsc::Sender<Result<T, Status>>,
+struct InnerConsumer {
     in_tx: mpsc::UnboundedSender<server::Response>,
     q: server::GenericQueue,
     m_consume_ok: GenericCounter<AtomicF64>,
     m_consume_err: GenericCounter<AtomicF64>,
     m_buffer: GenericGauge<AtomicF64>,
-    prefetch_semaphore: Arc<Semaphore>,
+    prefetch_semaphore: Semaphore,
+}
+
+#[derive(Debug, Clone)]
+struct GrpcConsumer<T> {
+    id: uuid::Uuid,
+    out_tx: mpsc::Sender<Result<T, Status>>,
+    inner: Arc<InnerConsumer>,
 }
 
 impl<T> GrpcConsumer<T> {
@@ -71,16 +76,19 @@ impl<T> GrpcConsumer<T> {
         let m_buffer = metrics::GRPC_GAUGE.with_label_values(&["buffer"]);
         let m_consume_ok = metrics::GRPC_COUNTER.with_label_values(&["consume", "ok"]);
         let m_consume_err = metrics::GRPC_COUNTER.with_label_values(&["consume", "error"]);
-        let prefetch_semaphore = Arc::new(Semaphore::new(prefetch_count));
-        Self {
-            id,
-            out_tx,
+        let prefetch_semaphore = Semaphore::new(prefetch_count);
+        let inner = InnerConsumer {
             in_tx,
             q,
             m_buffer,
             m_consume_ok,
             m_consume_err,
             prefetch_semaphore,
+        };
+        Self {
+            id,
+            out_tx,
+            inner: Arc::new(inner),
         }
     }
     fn new_box(
@@ -99,42 +107,53 @@ impl Consumer for GrpcConsumer<pb::SubscriptionResponse> {
     fn get_id(&self) -> uuid::Uuid {
         self.id
     }
+    fn get_prefetch_count(&self) -> usize {
+        0
+    }
     fn is_ackable(&self) -> bool {
         false
     }
     fn send(
-        &mut self,
+        &self,
         msg: Arc<Envelop>,
         tasks: &mut JoinSet<ConsumerSendResult>,
         _unack: &mut server::UnAck,
     ) -> Option<Arc<Envelop>> {
-        let consumer_id = self.id;
-        let out_tx = self.out_tx.clone();
-        let m_consume_err = self.m_consume_err.clone();
-        let m_consume_ok = self.m_consume_ok.clone();
+        let consumer = self.clone();
         tasks.spawn(async move {
-            let m = msg.message.clone();
-            let resp = pb::SubscriptionResponse {
-                kind: Some(subscription_response::Kind::Message(m)),
-            };
-            if let Err(_e) = out_tx.send(Ok(resp)).await {
-                m_consume_err.inc();
-                ConsumerSendResult::Requeue(msg, consumer_id)
+            if let Err(_) = consumer.send_message(msg.clone()).await {
+                ConsumerSendResult::Requeue(msg, consumer.id)
             } else {
-                m_consume_ok.inc();
-                ConsumerSendResult::Consumer(consumer_id)
+                ConsumerSendResult::Consumer(consumer.id)
             }
         });
         None
     }
+
+    async fn send_message(&self, msg: Arc<Envelop>) -> Result<(), SendMessageError> {
+        let m = msg.message.clone();
+        let resp = pb::SubscriptionResponse {
+            kind: Some(subscription_response::Kind::Message(m)),
+        };
+        Ok(self
+            .out_tx
+            .send(Ok(resp))
+            .await
+            .inspect(|_| self.inner.m_consume_ok.inc())
+            .map_err(|_| {
+                self.inner.m_consume_err.inc();
+                SendMessageError
+            })?)
+    }
+
     fn ack(&mut self, _msg_id: String, _unack: &mut server::UnAck) {}
     async fn send_resp(&self, resp: server::Response) -> Result<(), GenericError> {
-        self.in_tx.send(resp)?;
-        self.m_buffer.inc();
+        self.inner.in_tx.send(resp)?;
+        self.inner.m_buffer.inc();
         Ok(())
     }
     async fn stop(&self) {
-        let queue_name = self.q.get_name();
+        let queue_name = self.inner.q.get_name();
         let _ = self
             .send_resp(server::Response::StopConsume(queue_name))
             .await;
@@ -146,56 +165,66 @@ impl Consumer for GrpcConsumer<pb::Response> {
     fn get_id(&self) -> uuid::Uuid {
         self.id
     }
+    fn get_prefetch_count(&self) -> usize {
+        self.inner.prefetch_semaphore.available_permits()
+    }
     fn is_ackable(&self) -> bool {
         true
     }
     fn send(
-        &mut self,
+        &self,
         msg: Arc<Envelop>,
         tasks: &mut JoinSet<ConsumerSendResult>,
         unack: &mut server::UnAck,
     ) -> Option<Arc<Envelop>> {
-        let consumer_id = self.id;
+        let consumer = self.clone();
         unack.insert(msg.clone());
-        let mut meta = msg.meta.clone();
-        let out_tx = self.out_tx.clone();
-        meta.queue = self.q.get_name();
-        let m_consume_err = self.m_consume_err.clone();
-        let m_consume_ok = self.m_consume_ok.clone();
         let timeout = unack.timeout;
-        let sem = self.prefetch_semaphore.clone();
-        sem.forget_permits(1);
+        self.inner.prefetch_semaphore.forget_permits(1);
         tasks.spawn(async move {
-            let message = Some(msg.message.clone());
-            let meta = Some(meta);
-            let message = pb::MessageWithMeta { message, meta };
-            let resp = pb::Response {
-                kind: Some(pb::response::Kind::Message(message)),
-            };
-            if let Err(_e) = out_tx.send(Ok(resp)).await {
-                m_consume_err.inc();
+            if consumer.send_message(msg.clone()).await.is_err() {
                 ConsumerSendResult::RequeueAck(msg)
             } else {
-                m_consume_ok.inc();
                 tokio::select! {
-                    _ = sem.acquire() => ConsumerSendResult::Consumer(consumer_id),
+                    _ = consumer.inner.prefetch_semaphore.acquire() => ConsumerSendResult::Consumer(consumer.id),
                     _ = tokio::time::sleep(timeout) => ConsumerSendResult::AckTimeout(msg),
                 }
             }
         });
         None
     }
+
+    async fn send_message(&self, msg: Arc<Envelop>) -> Result<(), SendMessageError> {
+        let mut meta = msg.meta.clone();
+        meta.queue = self.inner.q.get_name();
+        let message = Some(msg.message.clone());
+        let meta = Some(meta);
+        let message = pb::MessageWithMeta { message, meta };
+        let resp = pb::Response {
+            kind: Some(pb::response::Kind::Message(message)),
+        };
+        Ok(self
+            .out_tx
+            .send(Ok(resp))
+            .await
+            .inspect(|_| self.inner.m_consume_ok.inc())
+            .map_err(|_| {
+                self.inner.m_consume_err.inc();
+                SendMessageError
+            })?)
+    }
+
     fn ack(&mut self, msg_id: String, unack: &mut server::UnAck) {
-        self.prefetch_semaphore.add_permits(1);
+        self.inner.prefetch_semaphore.add_permits(1);
         unack.remove(&msg_id, false);
     }
     async fn send_resp(&self, resp: server::Response) -> Result<(), GenericError> {
-        self.in_tx.send(resp)?;
-        self.m_buffer.inc();
+        self.inner.in_tx.send(resp)?;
+        self.inner.m_buffer.inc();
         Ok(())
     }
     async fn stop(&self) {
-        let queue_name = self.q.get_name();
+        let queue_name = self.inner.q.get_name();
         let _ = self
             .send_resp(server::Response::StopConsume(queue_name))
             .await;
@@ -214,7 +243,7 @@ impl hsmq_server::Hsmq for HsmqServer {
         if let Some(subscription) = self.subscriptions.get(&topic) {
             GRPC_COUNTER.with_label_values(&["publish", "ok"]).inc();
             let kind = Some(publish_response::Kind::MessageMeta(envelop.meta.clone()));
-            subscription.send(envelop).await;
+            subscription.publish(envelop).await;
             Ok(Response::new(PublishResponse { kind }))
         } else {
             GRPC_COUNTER.with_label_values(&["publish", "error"]).inc();
@@ -240,7 +269,7 @@ impl hsmq_server::Hsmq for HsmqServer {
                     let topic = message.topic.clone();
                     let envelop = Envelop::new(message);
                     if let Some(subscription) = self.subscriptions.get(&topic) {
-                        subscription.send(envelop).await;
+                        subscription.publish(envelop).await;
                         m_publish_ok.inc();
                         count += 1;
                     } else {
@@ -289,8 +318,7 @@ impl hsmq_server::Hsmq for HsmqServer {
                     queue.clone(),
                     0,
                 );
-                let cmd = QueueCommand::ConsumeStart(consumer);
-                match queue.send(cmd).await {
+                match queue.subscribe(consumer).await {
                     Ok(_) => {}
                     Err(e) => log::error!("Consume start error {:?}", e),
                 }
@@ -325,7 +353,7 @@ struct GrpcStreaming {
     consumer_id: Uuid,
     in_stream: Streaming<pb::Request>,
     out_tx: mpsc::Sender<Result<pb::Response, Status>>,
-    subs: HashMap<String, server::GenericQueue>,
+    subs: HashMap<String, server::GenericSubscriber>,
     queues: HashMap<String, server::GenericQueue>,
     server_tx: mpsc::UnboundedSender<server::Response>,
     server_rx: mpsc::UnboundedReceiver<server::Response>,
@@ -415,26 +443,25 @@ impl GrpcStreaming {
                 prefetch_count,
             }) => {
                 for queue_name in queues.iter() {
-                    if let Some(queue) = self.queues.get(queue_name) {
+                    if let Some(queue) = self.queues.get_mut(queue_name) {
+                        let q = queue.generic_clone();
                         let consumer = GrpcConsumer::new_box(
                             self.consumer_id,
                             self.out_tx.clone(),
                             self.server_tx.clone(),
-                            queue.clone(),
+                            q,
                             prefetch_count as usize,
                         );
-                        let cmd = QueueCommand::ConsumeStart(consumer);
-                        queue.send(cmd).await?;
-                        self.subs.insert(queue_name.clone(), queue.clone());
+                        let q = queue.subscribe(consumer).await?;
+                        self.subs.insert(queue_name.clone(), q);
                     }
                 }
             }
             pb::request::Kind::MessageAck(pb::MessageAck {
                 meta: Some(pb::MessageMeta { id, queue, shard }),
             }) => {
-                if let Some(queue) = self.queues.get(&queue) {
-                    let cmd = QueueCommand::MsgAck(id, shard, self.consumer_id);
-                    if let Err(e) = queue.send(cmd).await {
+                if let Some(subscriber) = self.subs.get_mut(&queue) {
+                    if let Err(e) = subscriber.ack(id, shard).await {
                         log::error!("Unexpected queue error {:?}", e);
                     };
                 }
