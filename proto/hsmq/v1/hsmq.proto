@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package hsmq.v1;
+package hsmq.v1.hsmq;
 
 import "google/protobuf/any.proto";
 
