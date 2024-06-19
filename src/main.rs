@@ -1,5 +1,5 @@
 pub mod pb {
-    tonic::include_proto!("hsmq.v1");
+    tonic::include_proto!("hsmq.v1.hsmq");
 }
 pub mod auth;
 pub mod cluster;
