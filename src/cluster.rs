@@ -76,6 +76,7 @@ impl JwtSocket {
         self.socket.readable().await
     }
 
+    #[allow(dead_code)]
     pub async fn wait_package(&self, timeout: Duration) -> Option<JwtPackage> {
         tokio::select! {
             _ = self.readable() => self.read_package(),
