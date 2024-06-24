@@ -244,7 +244,7 @@ impl Command {
     async fn run(
         &self,
         client_factory: ClientFactory,
-        cfg: Config,
+        _cfg: Config,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match self {
             Command::Publish { topic, data, count } => {
