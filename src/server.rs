@@ -2,33 +2,50 @@ use crate::config::{self, Config};
 use crate::errors::{GenericError, PublishMessageError, SendMessageError};
 use crate::metrics;
 use crate::pb::{Message, MessageMeta};
-use prometheus::core::{AtomicF64, GenericGauge};
+use prometheus::core::{AtomicF64, GenericCounter, GenericGauge};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::Debug;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinSet;
 use tokio_util::task::task_tracker::TaskTracker;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 #[derive(Debug)]
 pub struct Envelop {
     pub message: Message,
     pub meta: MessageMeta,
+    pub span: tracing::Span,
 }
 
 impl Envelop {
+    #[tracing::instrument(
+        name = "message",
+        fields(
+            message.topic = &message.topic,
+            message.key = &message.key,
+        ),
+        skip_all,
+    )]
     pub fn new(message: Message) -> Self {
+        let parent_cx =
+            opentelemetry::global::get_text_map_propagator(|prop| prop.extract(&message.headers));
+        let span = tracing::Span::current();
+        span.set_parent(parent_cx);
         Self {
             message,
             meta: MessageMeta::default(),
+            span,
         }
     }
 
     pub fn with_generated_id(mut self) -> Self {
-        self.meta.id = Uuid::now_v7().to_string();
+        let id = Uuid::now_v7().to_string();
+        self.meta.id = id.clone();
+        self.span.set_attribute("message.id", id);
         self
     }
 }
@@ -40,7 +57,7 @@ pub enum Response {
     GracefulShutdown(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Subscription {
     broadcast: broadcast::Sender<Arc<Envelop>>,
     subs: Vec<GenericQueue>,
@@ -63,6 +80,7 @@ impl Subscription {
         self.subs.push(queue);
     }
 
+    #[tracing::instrument(name = "subscription.publish", parent = &msg.span, skip_all)]
     pub async fn publish(&self, msg: Envelop) {
         let msg = Arc::new(msg);
         for q in self.subs.iter() {
@@ -85,13 +103,14 @@ pub enum ConsumerSendResult {
     Requeue(Arc<Envelop>, Uuid),
     RequeueAck(Arc<Envelop>),
     AckTimeout(Arc<Envelop>),
+    FetchDone,
     GracefulShutdown,
 }
 
 pub struct UnAck {
     unacked: HashMap<String, Arc<Envelop>>,
     m_unacked: GenericGauge<AtomicF64>,
-    m_ack_after: GenericGauge<AtomicF64>,
+    m_ack_after: GenericCounter<AtomicF64>,
     pub timeout: Duration,
 }
 
@@ -99,7 +118,7 @@ impl UnAck {
     pub fn new(queue_name: String, timeout: Duration) -> Self {
         let unacked = HashMap::new();
         let m_unacked = metrics::QUEUE_GAUGE.with_label_values(&[&queue_name, "unacked"]);
-        let m_ack_after = metrics::QUEUE_GAUGE.with_label_values(&[&queue_name, "ack-after"]);
+        let m_ack_after = metrics::QUEUE_COUNTER.with_label_values(&[&queue_name, "ack-after"]);
         Self {
             unacked,
             m_unacked,
@@ -131,7 +150,11 @@ impl UnAck {
 #[tonic::async_trait]
 pub trait Consumer: Debug {
     fn get_id(&self) -> Uuid;
+    fn generic_clone(&self) -> GenericConsumer;
+    fn get_current_tracing_span(&self) -> tracing::Span;
     fn is_ackable(&self) -> bool;
+    fn set_deadline(&mut self, deadline: SystemTime);
+    fn is_dead(&self) -> bool;
     fn get_prefetch_count(&self) -> usize;
     fn send(
         &self,
@@ -139,6 +162,7 @@ pub trait Consumer: Debug {
         tasks: &mut JoinSet<ConsumerSendResult>,
         unack: &mut UnAck,
     ) -> Option<Arc<Envelop>>;
+    async fn send_timeout(&self, msg: Arc<Envelop>) -> Result<(), SendMessageError>;
     async fn send_message(&self, msg: Arc<Envelop>) -> Result<(), SendMessageError>;
     fn ack(&mut self, msg_id: String, unack: &mut UnAck);
     async fn send_resp(&self, resp: Response) -> Result<(), GenericError>;
@@ -146,10 +170,11 @@ pub trait Consumer: Debug {
 }
 
 pub type GenericFuture<T> = Pin<Box<(dyn std::future::Future<Output = T> + Send + 'static)>>;
-pub type GenericConsumer = Box<dyn Consumer + Send + Sync + 'static>;
+pub type GenericConsumer = Box<dyn Consumer + Send + Sync>;
 
 pub enum QueueCommand {
     Msg(Arc<Envelop>),
+    FetchMsg(Uuid, SystemTime),
     MsgAck(String, String, Uuid),
     Requeue(Arc<Envelop>),
     ConsumeStart(GenericConsumer),
@@ -174,6 +199,7 @@ impl Clone for GenericQueue {
 #[tonic::async_trait]
 pub trait Subscriber: Debug {
     fn get_name(&self) -> String;
+    async fn fetch(&mut self, deadline: SystemTime) -> Result<(), GenericError>;
     async fn ack(&mut self, id: String, shard: String) -> Result<(), GenericError>;
     async fn send(&self, cmd: QueueCommand) -> Result<(), GenericError>;
 }
@@ -200,6 +226,13 @@ impl Subscriber for InMemorySubscriber {
         self.name.clone()
     }
 
+    async fn fetch(&mut self, deadline: SystemTime) -> Result<(), GenericError> {
+        Ok(self
+            .tx
+            .send(QueueCommand::FetchMsg(self.consumer_id, deadline))
+            .await?)
+    }
+
     async fn ack(&mut self, id: String, shard: String) -> Result<(), GenericError> {
         Ok(self
             .tx
@@ -223,6 +256,7 @@ impl Queue for InMemoryQueue {
         Box::new(self.clone())
     }
 
+    #[tracing::instrument(name = "InMemoryQueue.publish", parent = &msg.span, skip_all)]
     async fn publish(&self, msg: Arc<Envelop>) -> Result<(), PublishMessageError> {
         Ok(self
             .tx
@@ -298,6 +332,12 @@ impl InMemoryQueue {
                             }
                             m_messages.set(messages.len() as f64);
                         }
+                        QueueCommand::FetchMsg(consumer_id, deadline) => {
+                            if let Some(consumer) = consumers.get_mut(&consumer_id) {
+                                consumer.set_deadline(deadline);
+                                waiters.push_back(consumer_id);
+                            }
+                        }
                         QueueCommand::MsgAck(msg_id, _, consumer_id) => {
                             log::debug!("Received ack {:?}", &msg_id);
                             if let Some(consumer) = consumers.get_mut(&consumer_id) {
@@ -313,7 +353,9 @@ impl InMemoryQueue {
                         }
                         QueueCommand::ConsumeStart(consumer) => {
                             let id = consumer.get_id();
-                            waiters.push_back(id);
+                            if consumer.get_prefetch_count() > 0 {
+                                waiters.push_back(id);
+                            }
                             let _ = consumer.send_resp(Response::StartConsume(name.clone())).await;
                             consumers.insert(id, consumer);
                             m_consumers.inc();
@@ -352,6 +394,7 @@ impl InMemoryQueue {
                             m_sent.inc();
                             waiters.push_back(consumer_id);
                         }
+                        Ok(ConsumerSendResult::FetchDone) => m_sent.inc(),
                         Ok(ConsumerSendResult::GracefulShutdown) => {
                             if task_tracker.is_closed() {
                                 if messages.is_empty() {
@@ -380,6 +423,8 @@ impl InMemoryQueue {
                 if let Some(consumer_id) = waiters.pop_front() {
                     if let Some(consumer) = consumers.get_mut(&consumer_id) {
                         if let Some(msg) = messages.pop_front() {
+                            let span = tracing::span!(parent: &msg.span, tracing::Level::INFO, "queue.task_send");
+                            let _ = span.enter();
                             m_messages.set(messages.len() as f64);
                             if let Some(msg) = consumer.send(msg, &mut tasks, &mut unack) {
                                 messages.push_front(msg);

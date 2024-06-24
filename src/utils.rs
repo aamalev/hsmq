@@ -8,6 +8,10 @@ pub fn repr(m: &Message) -> String {
     let now = SystemTime::now();
     let mut result = format!("Message(topic='{}'", m.topic);
 
+    if !m.key.is_empty() {
+        result += format!(", key='{}'", &m.key).as_str();
+    }
+
     match any.type_url.as_str() {
         "string" | "int64" => {
             let s = String::from_utf8(any.value).unwrap();
@@ -34,4 +38,10 @@ pub fn repr(m: &Message) -> String {
 
     result += ")";
     result
+}
+
+pub fn current_time() -> std::time::Duration {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
 }

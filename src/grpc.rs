@@ -5,12 +5,16 @@ use crate::pb::{
     self, hsmq_server, publish_response, subscription_response, Message, PublishResponse,
     SubscribeQueueRequest, SubscriptionResponse,
 };
-use crate::server::{self, Consumer, ConsumerSendResult, Envelop, HsmqServer, QueueCommand};
+use crate::server::{
+    self, Consumer, ConsumerSendResult, Envelop, GenericConsumer, HsmqServer, QueueCommand,
+    Subscription,
+};
 use prometheus::core::{AtomicF64, GenericCounter, GenericGauge};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use std::{error::Error, io::ErrorKind};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
@@ -18,6 +22,7 @@ use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tokio_util::task::task_tracker::TaskTracker;
 use tonic::Streaming;
 use tonic::{transport::Server as TonicServer, Request, Response, Status};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 type HsmqResult<T> = Result<Response<T>, Status>;
@@ -49,20 +54,74 @@ impl GrpcService {
 }
 
 #[derive(Debug)]
-struct InnerConsumer {
+struct InnerConsumer<T> {
     in_tx: mpsc::UnboundedSender<server::Response>,
+    out_tx: mpsc::Sender<Result<T, Status>>,
     q: server::GenericQueue,
     m_consume_ok: GenericCounter<AtomicF64>,
     m_consume_err: GenericCounter<AtomicF64>,
     m_buffer: GenericGauge<AtomicF64>,
     prefetch_semaphore: Semaphore,
+    prefetch_count: usize,
+    is_ackable: bool,
 }
 
-#[derive(Debug, Clone)]
+#[tonic::async_trait]
+trait TInnerConsumer {
+    async fn send_message(self, msg: Arc<Envelop>) -> Result<(), SendMessageError>;
+}
+
+#[tonic::async_trait]
+impl TInnerConsumer for Arc<InnerConsumer<pb::SubscriptionResponse>> {
+    #[tracing::instrument(parent = &msg.span, skip_all)]
+    async fn send_message(self, msg: Arc<Envelop>) -> Result<(), SendMessageError> {
+        let m = msg.message.clone();
+        let resp = pb::SubscriptionResponse {
+            kind: Some(subscription_response::Kind::Message(m)),
+        };
+        self.out_tx
+            .send(Ok(resp))
+            .await
+            .map_err(|_| SendMessageError)
+    }
+}
+
+#[tonic::async_trait]
+impl TInnerConsumer for Arc<InnerConsumer<pb::Response>> {
+    #[tracing::instrument(parent = &msg.span, skip_all)]
+    async fn send_message(self, msg: Arc<Envelop>) -> Result<(), SendMessageError> {
+        let mut meta = msg.meta.clone();
+        meta.queue = self.q.get_name();
+        let message = Some(msg.message.clone());
+        let meta = Some(meta);
+        let message = pb::MessageWithMeta { message, meta };
+        let resp = pb::Response {
+            kind: Some(pb::response::Kind::Message(message)),
+        };
+        self.out_tx
+            .send(Ok(resp))
+            .await
+            .map_err(|_| SendMessageError)
+    }
+}
+
+#[derive(Debug)]
 struct GrpcConsumer<T> {
     id: uuid::Uuid,
-    out_tx: mpsc::Sender<Result<T, Status>>,
-    inner: Arc<InnerConsumer>,
+    inner: Arc<InnerConsumer<T>>,
+    span: Option<tracing::Span>,
+    deadline: Option<SystemTime>,
+}
+
+impl<T> Clone for GrpcConsumer<T> {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            span: Some(tracing::info_span!("grpc::consume")),
+            inner: self.inner.clone(),
+            deadline: self.deadline,
+        }
+    }
 }
 
 impl<T> GrpcConsumer<T> {
@@ -79,18 +138,23 @@ impl<T> GrpcConsumer<T> {
         let prefetch_semaphore = Semaphore::new(prefetch_count);
         let inner = InnerConsumer {
             in_tx,
+            out_tx,
             q,
             m_buffer,
             m_consume_ok,
             m_consume_err,
             prefetch_semaphore,
+            prefetch_count,
+            is_ackable: prefetch_count > 0,
         };
         Self {
             id,
-            out_tx,
             inner: Arc::new(inner),
+            span: None,
+            deadline: None,
         }
     }
+
     fn new_box(
         id: Uuid,
         out_tx: mpsc::Sender<Result<T, Status>>,
@@ -103,74 +167,51 @@ impl<T> GrpcConsumer<T> {
 }
 
 #[tonic::async_trait]
-impl Consumer for GrpcConsumer<pb::SubscriptionResponse> {
+impl<T> Consumer for GrpcConsumer<T>
+where
+    T: std::fmt::Debug + std::marker::Send + 'static,
+    Arc<InnerConsumer<T>>: TInnerConsumer,
+{
     fn get_id(&self) -> uuid::Uuid {
         self.id
     }
+
     fn get_prefetch_count(&self) -> usize {
-        0
+        self.inner.prefetch_count
     }
+
     fn is_ackable(&self) -> bool {
-        false
-    }
-    fn send(
-        &self,
-        msg: Arc<Envelop>,
-        tasks: &mut JoinSet<ConsumerSendResult>,
-        _unack: &mut server::UnAck,
-    ) -> Option<Arc<Envelop>> {
-        let consumer = self.clone();
-        tasks.spawn(async move {
-            if let Err(_) = consumer.send_message(msg.clone()).await {
-                ConsumerSendResult::Requeue(msg, consumer.id)
-            } else {
-                ConsumerSendResult::Consumer(consumer.id)
-            }
-        });
-        None
+        self.inner.is_ackable
     }
 
-    async fn send_message(&self, msg: Arc<Envelop>) -> Result<(), SendMessageError> {
-        let m = msg.message.clone();
-        let resp = pb::SubscriptionResponse {
-            kind: Some(subscription_response::Kind::Message(m)),
-        };
-        Ok(self
-            .out_tx
-            .send(Ok(resp))
-            .await
-            .inspect(|_| self.inner.m_consume_ok.inc())
-            .map_err(|_| {
-                self.inner.m_consume_err.inc();
-                SendMessageError
-            })?)
+    fn set_deadline(&mut self, deadline: SystemTime) {
+        self.deadline = Some(deadline);
     }
 
-    fn ack(&mut self, _msg_id: String, _unack: &mut server::UnAck) {}
-    async fn send_resp(&self, resp: server::Response) -> Result<(), GenericError> {
-        self.inner.in_tx.send(resp)?;
-        self.inner.m_buffer.inc();
+    fn is_dead(&self) -> bool {
+        self.deadline
+            .map(|x| x < SystemTime::now())
+            .unwrap_or_default()
+    }
+
+    async fn send_timeout(&self, _msg: Arc<Envelop>) -> Result<(), SendMessageError> {
         Ok(())
     }
-    async fn stop(&self) {
-        let queue_name = self.inner.q.get_name();
-        let _ = self
-            .send_resp(server::Response::StopConsume(queue_name))
-            .await;
-    }
-}
 
-#[tonic::async_trait]
-impl Consumer for GrpcConsumer<pb::Response> {
-    fn get_id(&self) -> uuid::Uuid {
-        self.id
+    fn generic_clone(&self) -> GenericConsumer {
+        let result = self.clone();
+        Box::new(result) as GenericConsumer
     }
-    fn get_prefetch_count(&self) -> usize {
-        self.inner.prefetch_semaphore.available_permits()
+
+    fn get_current_tracing_span(&self) -> tracing::Span {
+        if let Some(ref span) = self.span {
+            span.clone()
+        } else {
+            tracing::trace_span!("grpc::consumer")
+        }
     }
-    fn is_ackable(&self) -> bool {
-        true
-    }
+
+    #[tracing::instrument(parent = &msg.span, skip_all)]
     fn send(
         &self,
         msg: Arc<Envelop>,
@@ -178,51 +219,49 @@ impl Consumer for GrpcConsumer<pb::Response> {
         unack: &mut server::UnAck,
     ) -> Option<Arc<Envelop>> {
         let consumer = self.clone();
-        unack.insert(msg.clone());
+        let prefetch = self.inner.prefetch_count > 0;
         let timeout = unack.timeout;
-        self.inner.prefetch_semaphore.forget_permits(1);
+        if prefetch {
+            unack.insert(msg.clone());
+            self.inner.prefetch_semaphore.forget_permits(1);
+        }
         tasks.spawn(async move {
             if consumer.send_message(msg.clone()).await.is_err() {
                 ConsumerSendResult::RequeueAck(msg)
-            } else {
+            } else if prefetch {
                 tokio::select! {
                     _ = consumer.inner.prefetch_semaphore.acquire() => ConsumerSendResult::Consumer(consumer.id),
                     _ = tokio::time::sleep(timeout) => ConsumerSendResult::AckTimeout(msg),
                 }
+            } else {
+                ConsumerSendResult::FetchDone
             }
         });
         None
     }
 
+    #[tracing::instrument(parent = &msg.span, skip_all)]
     async fn send_message(&self, msg: Arc<Envelop>) -> Result<(), SendMessageError> {
-        let mut meta = msg.meta.clone();
-        meta.queue = self.inner.q.get_name();
-        let message = Some(msg.message.clone());
-        let meta = Some(meta);
-        let message = pb::MessageWithMeta { message, meta };
-        let resp = pb::Response {
-            kind: Some(pb::response::Kind::Message(message)),
-        };
-        Ok(self
-            .out_tx
-            .send(Ok(resp))
-            .await
+        let inner = self.inner.clone();
+        let result = inner.send_message(msg).await;
+        result
             .inspect(|_| self.inner.m_consume_ok.inc())
-            .map_err(|_| {
-                self.inner.m_consume_err.inc();
-                SendMessageError
-            })?)
+            .inspect_err(|_| self.inner.m_consume_err.inc())
     }
 
+    #[tracing::instrument(skip_all)]
     fn ack(&mut self, msg_id: String, unack: &mut server::UnAck) {
         self.inner.prefetch_semaphore.add_permits(1);
         unack.remove(&msg_id, false);
     }
+
+    #[tracing::instrument(skip_all)]
     async fn send_resp(&self, resp: server::Response) -> Result<(), GenericError> {
         self.inner.in_tx.send(resp)?;
         self.inner.m_buffer.inc();
         Ok(())
     }
+
     async fn stop(&self) {
         let queue_name = self.inner.q.get_name();
         let _ = self
@@ -233,6 +272,7 @@ impl Consumer for GrpcConsumer<pb::Response> {
 
 #[tonic::async_trait]
 impl hsmq_server::Hsmq for HsmqServer {
+    #[tracing::instrument(name = "publish", skip_all)]
     async fn publish(&self, request: Request<Message>) -> HsmqResult<PublishResponse> {
         if self.task_tracker.is_closed() {
             return Err(Status::cancelled("shutdown"));
@@ -240,10 +280,12 @@ impl hsmq_server::Hsmq for HsmqServer {
         let message = request.into_inner();
         let topic = message.topic.clone();
         let envelop = Envelop::new(message).with_generated_id();
+        tracing::Span::current().set_parent(envelop.span.context());
+
         if let Some(subscription) = self.subscriptions.get(&topic) {
             GRPC_COUNTER.with_label_values(&["publish", "ok"]).inc();
             let kind = Some(publish_response::Kind::MessageMeta(envelop.meta.clone()));
-            subscription.publish(envelop).await;
+            subscription.publish(envelop.with_generated_id()).await;
             Ok(Response::new(PublishResponse { kind }))
         } else {
             GRPC_COUNTER.with_label_values(&["publish", "error"]).inc();
@@ -266,8 +308,12 @@ impl hsmq_server::Hsmq for HsmqServer {
             };
             match result {
                 Ok(message) => {
+                    let span = tracing::trace_span!("publish");
+                    let _ = span.enter();
                     let topic = message.topic.clone();
-                    let envelop = Envelop::new(message);
+                    let envelop = Envelop::new(message).with_generated_id();
+                    span.set_parent(envelop.span.context());
+
                     if let Some(subscription) = self.subscriptions.get(&topic) {
                         subscription.publish(envelop).await;
                         m_publish_ok.inc();
@@ -340,7 +386,12 @@ impl hsmq_server::Hsmq for HsmqServer {
         let (response_tx, response_rx) = mpsc::channel::<Result<pb::Response, Status>>(1);
         let in_stream = request.into_inner();
 
-        GrpcStreaming::spawn(in_stream, response_tx, self.queues.clone());
+        GrpcStreaming::spawn(
+            in_stream,
+            response_tx,
+            self.queues.clone(),
+            self.subscriptions.clone(),
+        );
 
         let output_stream = ReceiverStream::new(response_rx);
         Ok(Response::new(
@@ -353,10 +404,13 @@ struct GrpcStreaming {
     consumer_id: Uuid,
     in_stream: Streaming<pb::Request>,
     out_tx: mpsc::Sender<Result<pb::Response, Status>>,
+    subscriptions: BTreeMap<String, Subscription>,
     subs: HashMap<String, server::GenericSubscriber>,
     queues: HashMap<String, server::GenericQueue>,
     server_tx: mpsc::UnboundedSender<server::Response>,
     server_rx: mpsc::UnboundedReceiver<server::Response>,
+    m_publish_ok: GenericCounter<AtomicF64>,
+    m_publish_err: GenericCounter<AtomicF64>,
 }
 
 impl GrpcStreaming {
@@ -364,6 +418,7 @@ impl GrpcStreaming {
         in_stream: Streaming<pb::Request>,
         out_tx: mpsc::Sender<Result<pb::Response, Status>>,
         queues: HashMap<String, server::GenericQueue>,
+        subscriptions: BTreeMap<String, Subscription>,
     ) {
         let (server_tx, server_rx) = mpsc::unbounded_channel::<server::Response>();
 
@@ -371,14 +426,20 @@ impl GrpcStreaming {
 
         let consumer_id = Uuid::now_v7();
 
+        let m_publish_ok = GRPC_COUNTER.with_label_values(&["publish", "ok"]);
+        let m_publish_err = GRPC_COUNTER.with_label_values(&["publish", "error"]);
+
         let s = Self {
             consumer_id,
             out_tx,
             in_stream,
             subs,
             queues,
+            subscriptions,
             server_tx,
             server_rx,
+            m_publish_ok,
+            m_publish_err,
         };
 
         tokio::spawn(s.run_loop());
@@ -438,6 +499,28 @@ impl GrpcStreaming {
 
     async fn req_kind(&mut self, kind: pb::request::Kind) -> Result<(), GenericError> {
         match kind {
+            pb::request::Kind::PublishMessage(pb::PublishMessage {
+                message: Some(message),
+                qos,
+            }) => {
+                let span = tracing::trace_span!("publish");
+                let _ = span.enter();
+                let topic = message.topic.clone();
+                let envelop = Envelop::new(message).with_generated_id();
+                span.set_parent(envelop.span.context());
+
+                if let Some(subscription) = self.subscriptions.get(&topic) {
+                    subscription.publish(envelop).await;
+                    self.m_publish_ok.inc();
+                    if qos == 1 {
+                        let kind = Some(pb::response::Kind::PubAck(pb::PubAck {}));
+                        self.out_tx.send(Ok(pb::Response { kind })).await?;
+                    }
+                } else {
+                    self.m_publish_err.inc();
+                    return Err(Status::not_found("Subscribers not found"))?;
+                }
+            }
             pb::request::Kind::SubscribeQueue(pb::SubscribeQueue {
                 queues,
                 prefetch_count,
@@ -464,6 +547,31 @@ impl GrpcStreaming {
                     if let Err(e) = subscriber.ack(id, shard).await {
                         log::error!("Unexpected queue error {:?}", e);
                     };
+                }
+            }
+            pb::request::Kind::MessageRequeue(_) => todo!(),
+            pb::request::Kind::FetchMessage(pb::FetchMessage { queue, timeout }) => {
+                let deadline = SystemTime::now() + Duration::from_secs_f32(timeout);
+                if let Some(subscriber) = self.subs.get_mut(&queue) {
+                    if let Err(e) = subscriber.fetch(deadline).await {
+                        log::error!("Unexpected queue error {:?}", e);
+                    };
+                } else {
+                    if let Some(qu) = self.queues.get_mut(&queue) {
+                        let q = qu.generic_clone();
+                        let consumer = GrpcConsumer::new_box(
+                            self.consumer_id,
+                            self.out_tx.clone(),
+                            self.server_tx.clone(),
+                            q,
+                            0,
+                        );
+                        let mut subscriber = qu.subscribe(consumer).await?;
+                        if let Err(e) = subscriber.fetch(deadline).await {
+                            log::error!("Unexpected queue error {:?}", e);
+                        };
+                        self.subs.insert(queue.clone(), subscriber);
+                    }
                 }
             }
             k => log::error!("Unexpected for streaming kind {:?}", k),
