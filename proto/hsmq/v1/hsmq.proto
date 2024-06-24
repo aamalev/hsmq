@@ -58,11 +58,30 @@ message MessageRequeue {
     MessageMeta meta = 1;
 }
 
+message PublishMessage {
+    Message message = 1;
+    uint32 qos = 2;
+}
+
+message PubAck {
+}
+
+message FetchMessage {
+    string queue = 1;
+    float timeout = 2;
+}
+
+message FetchMessageTimeout {
+    string queue = 1;
+}
+
 message Request {
     oneof kind {
         SubscribeQueue subscribe_queue = 1;
         MessageAck message_ack = 2;
         MessageRequeue message_requeue = 3;
+        PublishMessage publish_message = 4;
+        FetchMessage fetch_message = 5;
     }
 }
 
@@ -70,6 +89,8 @@ message Response {
     oneof kind {
         MessageWithMeta message = 1;
         Redirect redirect = 2;
+        PubAck pub_ack = 3;
+        FetchMessageTimeout fetch_message_timeout = 4;
     }
 }
 
