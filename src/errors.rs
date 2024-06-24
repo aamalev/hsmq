@@ -53,3 +53,18 @@ impl std::error::Error for AckMessageError {
         None
     }
 }
+
+#[derive(Debug)]
+pub struct FetchMessageError;
+
+impl std::fmt::Display for FetchMessageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FetchMessageError")
+    }
+}
+
+impl std::error::Error for FetchMessageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        None
+    }
+}
