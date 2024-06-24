@@ -9,6 +9,7 @@ pub mod grpc;
 pub mod jwt;
 pub mod metrics;
 pub mod server;
+pub mod utils;
 pub mod web;
 
 use clap::{command, Parser};
