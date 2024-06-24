@@ -1,14 +1,13 @@
 use std::{collections::HashMap, sync::Arc};
 
-use jsonwebtoken::{decode, DecodingKey, Validation};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
-use crate::{config, errors::AuthError, metrics::JWT_COUNTER};
+use crate::{config, errors::AuthError, jwt::JWT};
 
 #[derive(Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
-struct Claims {
-    sub: String,
-    exp: usize,
+pub struct Claims {
+    pub sub: String,
+    pub exp: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -24,37 +23,30 @@ impl From<Claims> for User {
     }
 }
 
-struct JwtSecret {
-    name: String,
-    secret: DecodingKey,
-}
-
 #[derive(Default)]
 pub struct Auth {
-    pub tokens: HashMap<String, Arc<User>>,
-    jwt_secrets: Vec<JwtSecret>,
+    tokens: HashMap<String, Arc<User>>,
+    pub jwt: Option<JWT>,
 }
 
 impl Auth {
-    pub fn new(cfg: config::Auth, users: HashMap<String, config::User>) -> Self {
-        let mut result = Self::default();
+    pub fn new(cfg: config::Auth) -> Self {
+        Self {
+            jwt: cfg.jwt.map(JWT::new),
+            ..Default::default()
+        }
+    }
+
+    pub fn with_users(mut self, users: HashMap<String, config::User>) -> Self {
         for (username, cfg) in users {
             let u = Arc::new(User { username });
             for token in cfg.tokens {
                 if let Some(token) = token.resolve() {
-                    result.tokens.insert(token, u.clone());
+                    self.tokens.insert(token, u.clone());
                 }
             }
         }
-        for (n, secret) in cfg.jwt.secrets.iter().enumerate() {
-            let name = secret.get_name().unwrap_or_else(|| n.to_string());
-            if let Some(secret) = secret.resolve() {
-                let secret = DecodingKey::from_secret(secret.as_ref());
-                let secret = JwtSecret { name, secret };
-                result.jwt_secrets.push(secret);
-            }
-        }
-        result
+        self
     }
 
     pub fn authorize(&self, authorization: &str) -> Result<Arc<User>, AuthError> {
@@ -63,9 +55,11 @@ impl Auth {
                 "Bearer" => {
                     if let Some(user) = self.tokens.get(token) {
                         Ok(user.clone())
-                    } else {
-                        let claims: Claims = self.jwt_decode(token)?;
+                    } else if let Some(ref jwt) = self.jwt {
+                        let claims: Claims = jwt.decode(token)?;
                         Ok(Arc::new(claims.into()))
+                    } else {
+                        Err(AuthError)
                     }
                 }
                 _ => Err(AuthError),
@@ -75,18 +69,6 @@ impl Auth {
         }
     }
 
-    pub fn jwt_decode<T>(&self, token: &str) -> Result<T, AuthError>
-    where
-        T: DeserializeOwned,
-    {
-        for secret in self.jwt_secrets.iter() {
-            if let Ok(token) = decode(token, &secret.secret, &Validation::default()) {
-                JWT_COUNTER.with_label_values(&[&secret.name]).inc();
-                return Ok(token.claims);
-            }
-        }
-        Err(AuthError)
-    }
     pub fn grpc_check_auth(
         &self,
         req: tonic::Request<()>,
@@ -103,17 +85,14 @@ impl Auth {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashMap,
-        sync::Arc,
-        time::{Duration, SystemTime},
-        vec,
+    use std::{collections::HashMap, sync::Arc, time::Duration, vec};
+
+    use crate::{
+        config::{self, ResolvableValue},
+        utils,
     };
 
-    use crate::config::{self, ResolvableValue};
-
     use super::{Auth, Claims, User};
-    use jsonwebtoken::{encode, EncodingKey, Header};
 
     #[tokio::test]
     async fn authorize_fail() {
@@ -132,56 +111,28 @@ mod tests {
         let mut users = HashMap::new();
         users.insert("user".to_string(), user);
         let cfg = config::Auth::default();
-        let auth = Auth::new(cfg, users);
+        let auth = Auth::new(cfg).with_users(users);
         let result = auth.authorize(&format!("Bearer {}", token));
         assert!(result.is_ok());
     }
 
     #[tokio::test]
-    async fn jwt_decode_ok() {
-        let secret = "secret".to_string();
-        let mut claims = Claims::default();
-        claims.exp = (SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            + Duration::from_secs(3600))
-        .as_secs() as usize;
-
-        let token = encode(
-            &Header::default(),
-            &claims,
-            &EncodingKey::from_secret(secret.as_ref()),
-        )
-        .unwrap();
+    async fn authorize_by_jwt() {
         let mut cfg = config::Auth::default();
-        cfg.jwt
-            .secrets
-            .push(crate::config::ResolvableValue::Value(secret));
-        let auth = Auth::new(cfg, HashMap::new());
-        let result = auth.jwt_decode::<Claims>(&token);
+        let mut jwt = config::JWT::default();
+        jwt.secrets
+            .push(crate::config::ResolvableValue::Value("123".to_string()));
+        cfg.jwt = Some(jwt);
+        let auth = Auth::new(cfg);
+        let mut claims = Claims::default();
+        claims.exp = (utils::current_time() + Duration::from_secs(3600)).as_secs() as usize;
+        let token = auth
+            .jwt
+            .as_ref()
+            .map(|j| j.encode(claims).unwrap())
+            .unwrap();
+        let result = auth.authorize(&format!("Bearer {}", token));
         assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn jwt_decode_expired() {
-        let secret = "secret".to_string();
-        let mut claims = Claims::default();
-        claims.exp = 1;
-
-        let token = encode(
-            &Header::default(),
-            &claims,
-            &EncodingKey::from_secret(secret.as_ref()),
-        )
-        .unwrap();
-        let mut cfg = config::Auth::default();
-        cfg.jwt
-            .secrets
-            .push(crate::config::ResolvableValue::Value(secret));
-        let auth = Auth::new(cfg, HashMap::new());
-        let result = auth.jwt_decode::<Claims>(&token);
-        log::error!("Error {:?}", &result);
-        assert!(result.is_err());
     }
 
     #[tokio::test]
