@@ -38,10 +38,11 @@ pub struct Prometheus {
     pub http_address: Option<SocketAddr>,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct Cluster {
     pub name: String,
-    pub udp_address: SocketAddr,
+    pub udp_port: u16,
+    pub jwt: Option<JWT>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
@@ -51,7 +52,7 @@ pub struct JWT {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct Auth {
-    pub jwt: JWT,
+    pub jwt: Option<JWT>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
@@ -145,6 +146,19 @@ impl Config {
         log::debug!("Loaded: {:?}", &result);
         Ok(result)
     }
+
+    pub fn cluster_jwt(&self) -> JWT {
+        self.cluster
+            .clone()
+            .unwrap_or_default()
+            .jwt
+            .or(self.auth.jwt.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn cluster_name(&self) -> Option<String> {
+        self.cluster.as_ref().map(|c| c.name.clone())
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -190,7 +204,7 @@ impl ResolvableValue {
                         } else {
                             match name {
                                 Some(name) => log::error!("Expect value in {} for {}", env, name),
-                                _ => log::error!("Expect value in {}", env),
+                                _ => log::info!("Expect value in {}", env),
                             };
                             None
                         }

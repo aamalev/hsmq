@@ -26,10 +26,23 @@ pub mod pb {
 
 #[path = "../config.rs"]
 pub mod config;
+use crate::cluster::{JwtPackage, Package};
 use crate::config::Config;
 
 #[path = "../utils.rs"]
 pub mod utils;
+
+#[path = "../errors.rs"]
+pub mod errors;
+
+#[path = "../metrics.rs"]
+pub mod metrics;
+
+#[path = "../jwt.rs"]
+pub mod jwt;
+
+#[path = "../cluster.rs"]
+pub mod cluster;
 
 use clap::{command, Parser, Subcommand};
 use jsonwebtoken::{encode, EncodingKey, Header};
@@ -98,6 +111,7 @@ impl ClientFactory {
             .auth
             .jwt
             .clone()
+            .unwrap_or_default()
             .secrets
             .iter()
         {
@@ -238,13 +252,18 @@ enum Command {
         #[command(subcommand)]
         command: StreaminCommand,
     },
+    /// Cluster commands
+    Cluster {
+        #[command(subcommand)]
+        command: ClusterCommand,
+    },
 }
 
 impl Command {
     async fn run(
         &self,
         client_factory: ClientFactory,
-        _cfg: Config,
+        cfg: Config,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match self {
             Command::Publish { topic, data, count } => {
@@ -255,6 +274,7 @@ impl Command {
                 self.subscribe_queue(client_factory, queues.clone()).await?
             }
             Command::Streaming { command } => command.run(client_factory).await?,
+            Command::Cluster { command } => command.run(client_factory, cfg).await?,
         }
         Ok(())
     }
@@ -702,6 +722,50 @@ impl StreaminCommand {
             "Messages {limit}, send {send}, recv {recv}, \
             seconds {duration:.3}, rate {rate:.3} rps"
         );
+        Ok(())
+    }
+}
+
+#[derive(Subcommand)]
+enum ClusterCommand {
+    /// Join node
+    Join {
+        /// Node address
+        #[command()]
+        address: String,
+    },
+}
+
+impl ClusterCommand {
+    async fn run(
+        &self,
+        _client_factory: ClientFactory,
+        cfg: Config,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let cluster_cfg = cfg.cluster.clone().unwrap_or_default();
+        let jwt_cfg = cfg.cluster_jwt();
+        let jwt = crate::jwt::JWT::new(jwt_cfg);
+        let sock = crate::cluster::JwtSocket::bind("0.0.0.0:0", jwt).await?;
+
+        match self {
+            ClusterCommand::Join { address } => {
+                let pack = crate::cluster::Package::Join {
+                    cluster: cluster_cfg.name.clone(),
+                    addr: address.to_string(),
+                };
+                sock.send_to(pack, address).await?;
+
+                if let Some(JwtPackage {
+                    pack: Package::Response { lines },
+                    ..
+                }) = sock.wait_package(Duration::from_secs(5)).await
+                {
+                    for line in lines {
+                        println!("{}", line);
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }

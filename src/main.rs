@@ -6,11 +6,14 @@ pub mod cluster;
 pub mod config;
 pub mod errors;
 pub mod grpc;
+pub mod jwt;
 pub mod metrics;
 pub mod server;
+pub mod utils;
 pub mod web;
 
 use clap::{command, Parser};
+use errors::GenericError;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -42,7 +45,7 @@ async fn ctrl_c(graceful: bool) {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), GenericError> {
     env_logger::init();
     let cli = Cli::parse();
 
@@ -52,19 +55,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Config::default()
     };
 
+    let hostname = gethostname::gethostname().to_string_lossy().to_string();
+
     let task_tracker = tokio_util::task::task_tracker::TaskTracker::new();
 
-    let grpc_addr = cfg.node.grpc_address.unwrap();
-
     let hsmq = HsmqServer::from(cfg.clone(), task_tracker.clone()).await?;
-    let auth = Arc::new(Auth::new(cfg.auth.clone(), cfg.users.clone()));
+    let auth = Arc::new(Auth::new(cfg.auth.clone()).with_users(cfg.users.clone()));
 
     let mut tasks = tokio::task::JoinSet::new();
 
-    let grpc_srv = grpc::GrpcService::new(grpc_addr, task_tracker.clone());
-    tasks.spawn(async move {
-        grpc_srv.run(hsmq, auth).await;
-    });
+    if let Some(grpc_addr) = cfg.node.grpc_address {
+        let grpc_srv = grpc::GrpcService::new(grpc_addr, task_tracker.clone());
+        let auth = auth.clone();
+        tasks.spawn(async move {
+            grpc_srv.run(hsmq, auth).await;
+        });
+    }
 
     if let Some(ref prometheus) = cfg.prometheus {
         if let Some(addr) = &prometheus.http_address {
@@ -77,10 +83,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if let Some(ref cluster) = cfg.cluster {
-        let w = cluster::Cluster::new(cluster.clone(), task_tracker.clone());
-        tasks.spawn(async move {
-            w.run().await;
-        });
+        let mut cluster_cfg = cluster.clone();
+        cluster_cfg.jwt = Some(cfg.cluster_jwt());
+        let node_name = format!("{}:{}", hostname, cluster.udp_port);
+        let w = cluster::Cluster::new(cluster_cfg, node_name, task_tracker.clone());
+        tasks.spawn(w.run());
     };
 
     #[cfg(not(unix))]
