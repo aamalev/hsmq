@@ -98,7 +98,6 @@ impl ClientFactory {
             .auth
             .jwt
             .clone()
-            .unwrap_or_default()
             .secrets
             .iter()
         {

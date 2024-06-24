@@ -39,3 +39,9 @@ pub fn repr(m: &Message) -> String {
     result += ")";
     result
 }
+
+pub fn current_time() -> std::time::Duration {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+}
