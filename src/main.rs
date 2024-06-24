@@ -46,6 +46,7 @@ async fn ctrl_c(graceful: bool) {
 
 #[tokio::main]
 async fn main() -> Result<(), GenericError> {
+    env_logger::init();
     let cli = Cli::parse();
 
     let cfg = if let Some(config_path) = cli.config.as_deref() {
