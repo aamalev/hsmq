@@ -10,7 +10,7 @@ secrets = [
 
 [cluster]
 name = "c1"
-udp_address = "0.0.0.0:4848"
+udp_port = 4848
 
 [prometheus]
 url = "/metrics"
