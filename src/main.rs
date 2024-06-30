@@ -74,10 +74,13 @@ async fn main() -> Result<(), GenericError> {
 
     if let Some(ref prometheus) = cfg.prometheus {
         if let Some(addr) = &prometheus.http_address {
-            let mut w = web::WebServer::new(*addr, task_tracker.clone());
-            w = w.serve_metrics(prometheus.clone());
+            let w = web::WebServer::new(*addr, task_tracker.clone());
+            let mut pcfg = prometheus.clone();
+            if let Some(cluster) = cfg.cluster_name() {
+                pcfg.labels.insert("cluster".to_string(), cluster);
+            }
             tasks.spawn(async move {
-                w.run().await;
+                w.serve_metrics(pcfg).run().await;
             });
         }
     };

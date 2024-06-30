@@ -36,6 +36,8 @@ pub struct Prometheus {
     #[serde(default = "default_metrics_path")]
     pub url: String,
     pub http_address: Option<SocketAddr>,
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
