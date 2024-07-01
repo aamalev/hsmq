@@ -12,6 +12,9 @@ pub mod server;
 pub mod utils;
 pub mod web;
 
+#[cfg(feature = "redis")]
+pub mod redis;
+
 use clap::{command, Parser};
 use errors::GenericError;
 use std::path::PathBuf;

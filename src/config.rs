@@ -101,6 +101,8 @@ fn default_prefetch_count() -> usize {
 #[serde(tag = "type")]
 pub enum Queue {
     InMemory(InMemoryQueue),
+    #[cfg(feature = "redis")]
+    RedisStream(RedisStreamConfig),
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -116,6 +118,53 @@ pub struct InMemoryQueue {
     pub prefetch_count: usize,
 }
 
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(untagged)]
+pub enum Stream {
+    String(String),
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct RedisConfig {
+    #[cfg(feature = "redis-cluster")]
+    pub nodes: Vec<String>,
+    #[cfg(not(feature = "redis-cluster"))]
+    pub uri: String,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<ResolvableValue>,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct RedisStreamConfig {
+    pub name: String,
+    #[serde(default)]
+    pub connector: String,
+    #[serde(default)]
+    pub topics: Vec<String>,
+    #[serde(default)]
+    pub maxlen: Option<usize>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    pub group: String,
+    #[serde(default)]
+    pub init_group: bool,
+    #[serde(default)]
+    pub nomkstream: bool,
+    pub streams: Vec<Stream>,
+    #[serde(default = "RedisStreamConfig::default_body_fieldname")]
+    pub body_fieldname: String,
+    #[serde(default)]
+    pub read_limit: Option<usize>,
+}
+
+impl RedisStreamConfig {
+    fn default_body_fieldname() -> String {
+        "body".to_string()
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct Config {
     pub node: Node,
@@ -127,6 +176,7 @@ pub struct Config {
     pub auth: Auth,
     #[serde(default)]
     pub users: HashMap<String, User>,
+    pub redis: HashMap<String, RedisConfig>,
 }
 
 impl Config {
