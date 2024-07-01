@@ -131,6 +131,7 @@ impl<T> GrpcConsumer<T> {
         in_tx: mpsc::UnboundedSender<server::Response>,
         q: server::GenericQueue,
         prefetch_count: usize,
+        autoack: bool,
     ) -> Self {
         let m_buffer = metrics::GRPC_GAUGE.with_label_values(&["buffer"]);
         let m_consume_ok = metrics::GRPC_COUNTER.with_label_values(&["consume", "ok"]);
@@ -145,7 +146,7 @@ impl<T> GrpcConsumer<T> {
             m_consume_err,
             prefetch_semaphore,
             prefetch_count,
-            is_ackable: prefetch_count > 0,
+            is_ackable: !autoack,
         };
         Self {
             id,
@@ -161,8 +162,9 @@ impl<T> GrpcConsumer<T> {
         in_tx: mpsc::UnboundedSender<server::Response>,
         q: server::GenericQueue,
         prefetch_count: usize,
+        autoack: bool,
     ) -> Box<Self> {
-        Box::new(Self::new(id, out_tx, in_tx, q, prefetch_count))
+        Box::new(Self::new(id, out_tx, in_tx, q, prefetch_count, autoack))
     }
 }
 
@@ -363,6 +365,7 @@ impl hsmq_server::Hsmq for HsmqServer {
                     server_tx.clone(),
                     queue.clone(),
                     0,
+                    false,
                 );
                 match queue.subscribe(consumer).await {
                     Ok(_) => {}
@@ -534,6 +537,7 @@ impl GrpcStreaming {
                             self.server_tx.clone(),
                             q,
                             prefetch_count as usize,
+                            false,
                         );
                         let q = queue.subscribe(consumer).await?;
                         self.subs.insert(queue_name.clone(), q);
@@ -550,28 +554,31 @@ impl GrpcStreaming {
                 }
             }
             pb::request::Kind::MessageRequeue(_) => todo!(),
-            pb::request::Kind::FetchMessage(pb::FetchMessage { queue, timeout }) => {
+            pb::request::Kind::FetchMessage(pb::FetchMessage {
+                queue,
+                timeout,
+                autoack,
+            }) => {
                 let deadline = SystemTime::now() + Duration::from_secs_f32(timeout);
                 if let Some(subscriber) = self.subs.get_mut(&queue) {
                     if let Err(e) = subscriber.fetch(deadline).await {
                         log::error!("Unexpected queue error {:?}", e);
                     };
-                } else {
-                    if let Some(qu) = self.queues.get_mut(&queue) {
-                        let q = qu.generic_clone();
-                        let consumer = GrpcConsumer::new_box(
-                            self.consumer_id,
-                            self.out_tx.clone(),
-                            self.server_tx.clone(),
-                            q,
-                            0,
-                        );
-                        let mut subscriber = qu.subscribe(consumer).await?;
-                        if let Err(e) = subscriber.fetch(deadline).await {
-                            log::error!("Unexpected queue error {:?}", e);
-                        };
-                        self.subs.insert(queue.clone(), subscriber);
-                    }
+                } else if let Some(qu) = self.queues.get_mut(&queue) {
+                    let q = qu.generic_clone();
+                    let consumer = GrpcConsumer::new_box(
+                        self.consumer_id,
+                        self.out_tx.clone(),
+                        self.server_tx.clone(),
+                        q,
+                        0,
+                        autoack,
+                    );
+                    let mut subscriber = qu.subscribe(consumer).await?;
+                    if let Err(e) = subscriber.fetch(deadline).await {
+                        log::error!("Unexpected queue error {:?}", e);
+                    };
+                    self.subs.insert(queue.clone(), subscriber);
                 }
             }
             k => log::error!("Unexpected for streaming kind {:?}", k),
