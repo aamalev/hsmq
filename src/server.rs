@@ -446,6 +446,9 @@ pub struct HsmqServer {
 
 impl HsmqServer {
     pub async fn from(config: Config, task_tracker: TaskTracker) -> Result<Self, GenericError> {
+        #[cfg(feature = "redis")]
+        let mut redis_connectors = crate::redis::Connectors::new(config.redis);
+
         let mut subscriptions = BTreeMap::new();
         let mut queues: HashMap<String, GenericQueue> = HashMap::new();
         for cfg_queue in config.queues {
@@ -459,17 +462,21 @@ impl HsmqServer {
                     }
                     queues.insert(name, q);
                 }
+                #[cfg(feature = "redis")]
                 config::Queue::RedisStream(cfg_queue) => {
-                    let name = cfg_queue.name.clone();
+                    let connector = redis_connectors
+                        .get_connection(&cfg_queue.connector)
+                        .await?;
                     let q = crate::redis::stream::RedisStreamQueue::new_generic(
                         cfg_queue.clone(),
                         task_tracker.clone(),
+                        connector,
                     );
                     for topic in cfg_queue.topics {
                         let sub = subscriptions.entry(topic).or_insert_with(Subscription::new);
                         sub.subscribe(q.clone());
                     }
-                    queues.insert(name, q);
+                    queues.insert(cfg_queue.name.clone(), q);
                 }
             };
         }

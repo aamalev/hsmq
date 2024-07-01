@@ -8,10 +8,12 @@ pub mod errors;
 pub mod grpc;
 pub mod jwt;
 pub mod metrics;
-pub mod redis;
 pub mod server;
 pub mod utils;
 pub mod web;
+
+#[cfg(feature = "redis")]
+pub mod redis;
 
 use clap::{command, Parser};
 use errors::GenericError;

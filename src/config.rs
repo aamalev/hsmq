@@ -101,6 +101,7 @@ fn default_prefetch_count() -> usize {
 #[serde(tag = "type")]
 pub enum Queue {
     InMemory(InMemoryQueue),
+    #[cfg(feature = "redis")]
     RedisStream(RedisStreamConfig),
 }
 
@@ -124,24 +125,7 @@ pub enum Stream {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-pub struct RedisStreamConfig {
-    pub name: String,
-    #[serde(default)]
-    pub topics: Vec<String>,
-    #[serde(default)]
-    pub maxlen: Option<usize>,
-    #[serde(default)]
-    pub limit: Option<usize>,
-    #[serde(default)]
-    pub ack_timeout: Duration,
-    pub group: String,
-    #[serde(default)]
-    pub nomkstream: bool,
-    pub streams: Vec<Stream>,
-    #[serde(default = "RedisStreamConfig::default_body_fieldname")]
-    pub body_fieldname: String,
-    #[serde(default = "RedisStreamConfig::default_readers_pool")]
-    pub readers_pool: usize,
+pub struct RedisConfig {
     pub nodes: Vec<String>,
     #[serde(default)]
     pub username: Option<String>,
@@ -149,12 +133,32 @@ pub struct RedisStreamConfig {
     pub password: Option<ResolvableValue>,
 }
 
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct RedisStreamConfig {
+    pub name: String,
+    #[serde(default)]
+    pub connector: String,
+    #[serde(default)]
+    pub topics: Vec<String>,
+    #[serde(default)]
+    pub maxlen: Option<usize>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    pub group: String,
+    #[serde(default)]
+    pub init_group: bool,
+    #[serde(default)]
+    pub nomkstream: bool,
+    pub streams: Vec<Stream>,
+    #[serde(default = "RedisStreamConfig::default_body_fieldname")]
+    pub body_fieldname: String,
+    #[serde(default)]
+    pub read_limit: Option<usize>,
+}
+
 impl RedisStreamConfig {
     fn default_body_fieldname() -> String {
         "body".to_string()
-    }
-    fn default_readers_pool() -> usize {
-        1
     }
 }
 
@@ -169,6 +173,7 @@ pub struct Config {
     pub auth: Auth,
     #[serde(default)]
     pub users: HashMap<String, User>,
+    pub redis: HashMap<String, RedisConfig>,
 }
 
 impl Config {
