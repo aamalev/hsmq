@@ -607,6 +607,7 @@ impl StreaminCommand {
             let cmd = pb::FetchMessage {
                 queue: queue.clone(),
                 timeout: 5.0,
+                autoack: true,
             };
             let kind = Some(pb::request::Kind::FetchMessage(cmd));
             let req = pb::Request { kind };
