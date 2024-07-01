@@ -44,7 +44,7 @@ impl Envelop {
 
     pub fn with_generated_id(mut self) -> Self {
         let id = Uuid::now_v7().to_string();
-        self.meta.id = id.clone();
+        self.meta.id.clone_from(&id);
         self.span.set_attribute("message.id", id);
         self
     }

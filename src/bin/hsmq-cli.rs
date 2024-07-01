@@ -187,7 +187,7 @@ impl Cli {
 
         if let Some(ref p) = cfg.prometheus {
             if let Some(ref addr) = p.http_address {
-                let mut addr = addr.clone();
+                let mut addr = *addr;
                 addr.set_port(8081);
                 tokio::spawn(Self::prometheus(addr, p.url.to_string()));
             }
@@ -454,7 +454,7 @@ impl StreaminCommand {
             });
             let now = utils::current_time().as_secs_f64().to_string();
             let msg_id = uuid::Uuid::now_v7();
-            msg.topic = topic.clone();
+            msg.topic.clone_from(&topic);
             msg.headers.insert("uuid".to_string(), msg_id.to_string());
             msg.headers.insert("ts".to_string(), now);
             let cmd = pb::PublishMessage {
