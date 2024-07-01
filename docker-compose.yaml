@@ -1,0 +1,17 @@
+version: "3.5"
+services:
+  hsmq:
+    image: hsmq
+    build: .
+    ports:
+      - 4848-4855:4848
+    volumes:
+      - ${PWD}/hsmq.toml:/etc/hsmq.toml
+    environment:
+      RUST_LOG: error
+      TOKEN: 123
+    networks: ["hsmq"]
+
+networks:
+  hsmq:
+    name: hsmq

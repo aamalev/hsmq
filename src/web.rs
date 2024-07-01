@@ -1,14 +1,24 @@
 use axum::{response::IntoResponse, routing, Router};
+use prometheus::proto::LabelPair;
 use prometheus::{Encoder, TextEncoder};
 use std::net::SocketAddr;
 use tokio_util::task::task_tracker::TaskTracker;
 
 use crate::config;
 
-async fn internal_metrics() -> impl IntoResponse {
+fn internal_metrics(labels: Vec<LabelPair>) -> impl IntoResponse {
     let encoder = TextEncoder::new();
 
-    let metric_families = prometheus::gather();
+    let mut metric_families = prometheus::gather();
+    for mf in metric_families.iter_mut() {
+        let rm = mf.mut_metric();
+        for i in rm.iter_mut() {
+            let l = i.mut_label();
+            for lp in labels.iter() {
+                l.push(lp.to_owned());
+            }
+        }
+    }
     let mut buffer = vec![];
     encoder.encode(&metric_families, &mut buffer).unwrap();
 
@@ -31,7 +41,17 @@ impl WebServer {
     }
 
     pub fn serve_metrics(mut self, cfg: config::Prometheus) -> Self {
-        self.router = self.router.route(&cfg.url, routing::get(internal_metrics));
+        let mut labels = vec![];
+        for (k, v) in cfg.labels.into_iter() {
+            let mut pair = LabelPair::new();
+            pair.set_name(k);
+            pair.set_value(v);
+            labels.push(pair);
+        }
+        self.router = self.router.route(
+            &cfg.url,
+            routing::get(|| async move { internal_metrics(labels) }),
+        );
         self
     }
 
