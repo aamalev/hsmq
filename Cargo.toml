@@ -40,6 +40,7 @@ uuid = { version = "1.8.0", features = ["v4", "v7"] }
 tonic-build = "0.11"
 
 [features]
-default = ["redis"]
-redis = ["redis/tokio-comp", "redis/cluster-async"]
+default = ["redis", "redis-cluster"]
+redis = ["redis/tokio-comp"]
+redis-cluster = ["redis/cluster-async"]
 redis-stream-order-atomic = []

@@ -3,11 +3,20 @@ pub mod stream;
 use std::collections::HashMap;
 
 use crate::{config::RedisConfig, errors::GenericError};
-use redis::{cluster::ClusterClient, IntoConnectionInfo};
+use redis::IntoConnectionInfo;
 
+#[cfg(feature = "redis-cluster")]
+type Client = redis::cluster::ClusterClient;
+#[cfg(not(feature = "redis-cluster"))]
+type Client = redis::Client;
+
+#[cfg(feature = "redis-cluster")]
 type RedisConnection = redis::cluster_async::ClusterConnection;
+#[cfg(not(feature = "redis-cluster"))]
+type RedisConnection = redis::aio::MultiplexedConnection;
 
-pub fn create_client(config: &RedisConfig) -> Result<ClusterClient, GenericError> {
+#[cfg(feature = "redis-cluster")]
+pub fn create_client(config: &RedisConfig) -> Result<Client, GenericError> {
     let password = config.password.clone().map(String::from);
     let nodes = config
         .nodes
@@ -24,7 +33,23 @@ pub fn create_client(config: &RedisConfig) -> Result<ClusterClient, GenericError
             i.redis.password.clone_from(&password);
             i
         });
-    let redis = ClusterClient::new(nodes).inspect_err(|e| {
+    let redis = Client::new(nodes).inspect_err(|e| {
+        log::error!("Critical error with redis: {}", e);
+    })?;
+    Ok(redis)
+}
+
+#[cfg(not(feature = "redis-cluster"))]
+pub fn create_client(config: &RedisConfig) -> Result<Client, GenericError> {
+    let password = config.password.clone().map(String::from);
+    let info = config.uri.clone().into_connection_info()
+        .map(|mut i| {
+            i.redis.username.clone_from(&config.username);
+            i.redis.password.clone_from(&password);
+            i
+        })?;
+
+    let redis = Client::open(info).inspect_err(|e| {
         log::error!("Critical error with redis: {}", e);
     })?;
     Ok(redis)
@@ -32,7 +57,7 @@ pub fn create_client(config: &RedisConfig) -> Result<ClusterClient, GenericError
 
 pub struct Connectors {
     cfg: HashMap<String, RedisConfig>,
-    m: HashMap<String, ClusterClient>,
+    m: HashMap<String, Client>,
 }
 
 impl Connectors {
@@ -42,15 +67,20 @@ impl Connectors {
     }
 
     pub async fn get_connection(&mut self, name: &str) -> Result<RedisConnection, GenericError> {
-        let connector = if let Some(c) = self.m.get(name) {
-            c.get_async_connection().await?
+        let c = if let Some(c) = self.m.get(name) {
+            c
         } else if let Some(cfg_connector) = self.cfg.get(name) {
-            let c = crate::redis::create_client(cfg_connector).unwrap();
+            let c = create_client(cfg_connector)?;
             self.m.insert(name.to_string(), c);
-            self.m[name].get_async_connection().await?
+            &self.m[name]
         } else {
             panic!("Not found redis-connector {}", name);
         };
+        #[cfg(feature = "redis-cluster")]
+        let connector = c.get_async_connection().await?;
+        #[cfg(not(feature = "redis-cluster"))]
+        let connector = c.get_multiplexed_async_connection().await?;
+
         Ok(connector)
     }
 }

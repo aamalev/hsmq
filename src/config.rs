@@ -126,7 +126,10 @@ pub enum Stream {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct RedisConfig {
+    #[cfg(feature = "redis-cluster")]
     pub nodes: Vec<String>,
+    #[cfg(not(feature = "redis-cluster"))]
+    pub uri: String,
     #[serde(default)]
     pub username: Option<String>,
     #[serde(default)]
