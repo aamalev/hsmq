@@ -38,10 +38,17 @@ impl GrpcService {
     }
     pub async fn run(&self, hsmq: HsmqServer, auth: Arc<Auth>) {
         let task_tracker = self.task_tracker.clone();
+
+        let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+        health_reporter
+            .set_serving::<hsmq_server::HsmqServer<HsmqServer>>()
+            .await;
+
         let svc =
             hsmq_server::HsmqServer::with_interceptor(hsmq, move |req| auth.grpc_check_auth(req));
         log::info!("Run grpc on {:?}", &self.addr);
         if let Err(e) = TonicServer::builder()
+            .add_service(health_service)
             .add_service(svc)
             .serve_with_shutdown(self.addr, async move { task_tracker.wait().await })
             .await
