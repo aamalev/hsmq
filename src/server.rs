@@ -162,7 +162,7 @@ pub trait Consumer: Debug {
         tasks: &mut JoinSet<ConsumerSendResult>,
         unack: &mut UnAck,
     ) -> Option<Arc<Envelop>>;
-    async fn send_timeout(&self, msg: Arc<Envelop>) -> Result<(), SendMessageError>;
+    async fn send_timeout(&self, queue: String) -> Result<(), GenericError>;
     async fn send_message(&self, msg: Arc<Envelop>) -> Result<(), SendMessageError>;
     fn ack(&mut self, msg_id: String, unack: &mut UnAck);
     async fn send_resp(&self, resp: Response) -> Result<(), GenericError>;
