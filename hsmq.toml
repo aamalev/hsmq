@@ -29,8 +29,10 @@ topics = [
 type = "RedisStream"
 name = "redis-stream"
 connector = "redis-local"
-group = "redis-stream"
-init_group = true
+group.name = "redis-stream"
+group.init = true
+group.clear.every = { m = 1 }
+group.clear.max_idle = { m = 3 }
 nomkstream = false
 maxlen = 999
 limit = 99

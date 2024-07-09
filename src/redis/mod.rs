@@ -42,12 +42,11 @@ pub fn create_client(config: &RedisConfig) -> Result<Client, GenericError> {
 #[cfg(not(feature = "redis-cluster"))]
 pub fn create_client(config: &RedisConfig) -> Result<Client, GenericError> {
     let password = config.password.clone().map(String::from);
-    let info = config.uri.clone().into_connection_info()
-        .map(|mut i| {
-            i.redis.username.clone_from(&config.username);
-            i.redis.password.clone_from(&password);
-            i
-        })?;
+    let info = config.uri.clone().into_connection_info().map(|mut i| {
+        i.redis.username.clone_from(&config.username);
+        i.redis.password.clone_from(&password);
+        i
+    })?;
 
     let redis = Client::open(info).inspect_err(|e| {
         log::error!("Critical error with redis: {}", e);

@@ -1,7 +1,7 @@
 use opentelemetry::trace::FutureExt;
-use prometheus::core::{AtomicF64, GenericCounter};
-use rand::seq::SliceRandom;
-use redis::aio::ConnectionLike;
+use prometheus::core::{AtomicF64, GenericCounter, GenericGauge};
+use rand::{seq::SliceRandom, Rng};
+use redis::{aio::ConnectionLike, RedisResult};
 use std::{
     collections::{BinaryHeap, HashMap, VecDeque},
     fmt::{Debug, Display},
@@ -14,12 +14,12 @@ use std::{
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_stream::StreamExt;
 use tokio_util::{task::TaskTracker, time::DelayQueue};
-use tracing::{error, Instrument};
+use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 use crate::{
-    config::{RedisStreamConfig, Stream},
+    config::{RedisStreamConfig, RedisStreamGroupCleanConfig, RedisStreamGroupConfig, Stream},
     errors::{FetchMessageError, GenericError, PublishMessageError},
     metrics, pb,
     server::{
@@ -28,6 +28,8 @@ use crate::{
     },
     utils,
 };
+
+use super::RedisConnection;
 
 #[allow(dead_code)]
 fn cmd_to_string(cmd: redis::Cmd) -> String {
@@ -79,7 +81,8 @@ struct RedisStream<T> {
     connection: crate::redis::RedisConnection,
     cfg: RedisStreamConfig,
     name: String,
-    fail: usize,
+    group: String,
+    fail: Arc<AtomicU64>,
     m_sleep: GenericCounter<AtomicF64>,
     m_xadd: GenericCounter<AtomicF64>,
     m_xread: GenericCounter<AtomicF64>,
@@ -145,7 +148,7 @@ impl<T> Display for RedisStream<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&format!(
             "<RedisStream {} group={}>",
-            &self.name, &self.cfg.group
+            &self.name, &self.group,
         ))
     }
 }
@@ -196,12 +199,49 @@ impl RedisStreamR {
         let m_xread_nil = metrics::REDIS_COUNTER.with_label_values(&[&name, "XREADGROUP-NIL"]);
         let m_xread_err = metrics::REDIS_COUNTER.with_label_values(&[&name, "XREADGROUP-ERR"]);
         let m_xack = metrics::REDIS_COUNTER.with_label_values(&[&name, "XACK"]);
+        let queue = name.clone();
+        let group = match cfg.group {
+            RedisStreamGroupConfig::Name(ref name) => name.to_string(),
+            RedisStreamGroupConfig::Group {
+                ref name,
+                init,
+                ref clear,
+            } => {
+                if init {
+                    tokio::spawn(Self::init_group(
+                        connection.clone(),
+                        queue.clone(),
+                        name.to_string(),
+                    ));
+                };
+                if let Some(RedisStreamGroupCleanConfig { every, max_idle }) = clear {
+                    let group = name.to_string();
+                    let every = std::time::Duration::from(every.clone());
+                    let max_idle = std::time::Duration::from(max_idle.clone()).as_secs();
+                    let mut c = connection.clone();
+                    tokio::spawn(async move {
+                        let sleep_start = rand::thread_rng().gen_range(0..every.as_secs());
+                        tokio::time::sleep(std::time::Duration::from_secs(sleep_start)).await;
+                        loop {
+                            if let Err(e) =
+                                Self::clear_consumers(&mut c, &queue, &group, max_idle).await
+                            {
+                                tracing::error!("Clear consumers with error {:?}", e);
+                            }
+                            tokio::time::sleep(every).await;
+                        }
+                    });
+                };
+                name.to_string()
+            }
+        };
         Self {
             order_id: Default::default(),
             connection,
             cfg,
             name,
-            fail: 0,
+            group,
+            fail: Default::default(),
             m_sleep,
             m_xadd,
             m_xread,
@@ -211,16 +251,11 @@ impl RedisStreamR {
         }
     }
 
-    fn with_now_order(mut self) -> Self {
-        self.up();
-        self
-    }
-
     fn up(&mut self) {
         self.set_order_u64(utils::current_time().as_millis() as u64);
     }
 
-    #[tracing::instrument(name = "stream.execute", skip_all)]
+    #[tracing::instrument(name = "stream.execute", skip_all, level = "trace")]
     async fn execute<R>(&mut self, cmd: redis::Cmd) -> redis::RedisResult<R>
     where
         R: redis::FromRedisValue,
@@ -229,45 +264,60 @@ impl RedisStreamR {
         redis::FromRedisValue::from_redis_value(&result)
     }
 
-    async fn init_group(mut self) {
+    async fn init_group(mut connection: RedisConnection, name: String, group: String) {
         let cmd = redis::cmd("XGROUP")
             .arg("CREATE")
-            .arg(&self.name)
-            .arg(&self.cfg.group)
+            .arg(&name)
+            .arg(&group)
             .arg("$")
             .arg("MKSTREAM")
             .to_owned();
-        if let Err(e) = self.connection.req_packed_command(&cmd).await {
-            log::debug!(
-                "Init group {} for {} error {:?}",
-                &self.cfg.group,
-                &self.name,
-                e
-            );
+        if let Err(e) = connection.req_packed_command(&cmd).await {
+            log::debug!("Init group {} for {} error {:?}", group, name, e);
         }
     }
 
-    async fn get_consumers(&mut self) -> Vec<RedisConsumer> {
+    async fn get_consumers(
+        connection: &mut RedisConnection,
+        name: &String,
+        group: &String,
+    ) -> RedisResult<Vec<RedisConsumer>> {
         let cmd = redis::cmd("XINFO")
             .arg("CONSUMERS")
-            .arg(&self.name)
-            .arg(&self.cfg.group)
+            .arg(name)
+            .arg(group)
             .to_owned();
-        self.execute(cmd).await.unwrap_or_default()
+        let result = connection.req_packed_command(&cmd).await?;
+        redis::FromRedisValue::from_redis_value(&result)
     }
 
-    async fn clear_consumers(mut self) -> redis::RedisResult<()> {
+    async fn clear_consumers(
+        connection: &mut RedisConnection,
+        name: &String,
+        group: &String,
+        max_idle: u64,
+    ) -> redis::RedisResult<()> {
         let cmd = redis::cmd("XGROUP")
             .arg("DELCONSUMER")
-            .arg(&self.name)
-            .arg(&self.cfg.group)
+            .arg(name)
+            .arg(group)
             .to_owned();
-        for rc in self.get_consumers().await.into_iter() {
-            println!("Consumer {:?}", &rc);
-            if rc.idle > 60 {
-                let cmd = cmd.clone().arg(rc.name).to_owned();
-                self.execute(cmd).await?;
-            };
+
+        let consumers = Self::get_consumers(connection, name, group).await?;
+        let idles: Vec<_> = consumers
+            .into_iter()
+            .filter(|rc| rc.idle > max_idle)
+            .collect();
+
+        for rc in idles.iter() {
+            tracing::trace!("Delete idle consumer {:?}", rc);
+            let cmd = cmd.clone().arg(&rc.name).to_owned();
+            connection.req_packed_command(&cmd).await?;
+        }
+        if idles.is_empty() {
+            tracing::info!("[{}] No idle consumers", name);
+        } else {
+            tracing::info!("[{}] Deleted {} idle consumers", name, idles.len());
         }
         Ok(())
     }
@@ -276,6 +326,7 @@ impl RedisStreamR {
         name = "stream.insert",
         fields(msg_id = &msg.meta.id, stream = &self.name),
         skip_all,
+        level = "trace",
     )]
     async fn insert(&mut self, msg: Arc<server::Envelop>) -> Result<String, redis::RedisError> {
         let mut cmd = redis::cmd("XADD").arg(&self.name).to_owned();
@@ -306,15 +357,15 @@ impl RedisStreamR {
         Ok(msg_id)
     }
 
-    #[tracing::instrument(name = "stream.fetch", fields(msg_id, stream = &self.name), skip_all)]
+    #[tracing::instrument(name = "stream.fetch", fields(msg_id, stream = &self.name), skip_all, level = "trace")]
     async fn fetch(
         &mut self,
         noack: bool,
-        consumer_id: Uuid,
+        consumer_id: String,
     ) -> Result<Envelop, redis::RedisError> {
         let mut cmd = redis::cmd("XREADGROUP")
             .arg(b"GROUP")
-            .arg(&self.cfg.group)
+            .arg(&self.group)
             .arg(consumer_id.to_string())
             .arg(b"COUNT")
             .arg(b"1")
@@ -360,7 +411,7 @@ impl RedisStreamR {
                                     msg.headers
                                         .insert(k, String::from_utf8_lossy(&v).to_string());
                                 }
-                                self.fail = 0;
+                                self.fail.store(0, Ordering::Relaxed);
                             }
                             if let Some(redis::Value::Data(id)) = b.pop() {
                                 msg_id = String::from_utf8_lossy(&id).to_string();
@@ -383,7 +434,7 @@ impl RedisStreamR {
             }
             redis::Value::Nil => {
                 self.m_xread_nil.inc();
-                self.fail += 1;
+                self.fail.fetch_add(1, Ordering::Relaxed);
                 Err(redis::RedisError::from((
                     redis::ErrorKind::TypeError,
                     "Empty",
@@ -391,7 +442,7 @@ impl RedisStreamR {
             }
             other => {
                 self.m_xread_err.inc();
-                self.fail += 10;
+                self.fail.fetch_add(10, Ordering::Relaxed);
                 Err(redis::RedisError::from((
                     redis::ErrorKind::ParseError,
                     "Unexpected value",
@@ -401,20 +452,11 @@ impl RedisStreamR {
         }
     }
 
-    #[tracing::instrument(skip_all)]
-    async fn wait(self) {
-        self.m_sleep.inc();
-        match self.fail {
-            x if x > 99 => tokio::time::sleep(Duration::from_millis(1000)).await,
-            x if x > 30 => tokio::time::sleep(Duration::from_millis(100 * x as u64)).await,
-            _ => {}
-        };
-    }
-
     #[tracing::instrument(
         name = "stream.ack",
         fields(msg_id = id, stream = &self.name),
         skip_all,
+        level = "trace",
     )]
     async fn ack(
         &mut self,
@@ -424,7 +466,7 @@ impl RedisStreamR {
     ) -> Result<bool, redis::RedisError> {
         let cmd = redis::cmd("XACK")
             .arg(&stream)
-            .arg(&self.cfg.group)
+            .arg(&self.group)
             .arg(&id)
             .to_owned();
         self.m_xack.inc();
@@ -436,13 +478,20 @@ impl RedisStreamR {
 struct SubscriberRedisStream {
     name: String,
     consumer: GenericConsumer,
-    consumer_id: Uuid,
+    consumer_id: String,
     delay: tokio_util::time::DelayQueue<RedisStreamR>,
     fetchers: BinaryHeap<RedisStreamR>,
     streams: HashMap<String, RedisStreamR>,
     m_sent: GenericCounter<AtomicF64>,
+    m_consumers: GenericGauge<AtomicF64>,
     tx_fetch: mpsc::Sender<FetchCommand>,
     read_limit: usize,
+}
+
+impl Drop for SubscriberRedisStream {
+    fn drop(&mut self) {
+        self.m_consumers.dec();
+    }
 }
 
 impl SubscriberRedisStream {
@@ -455,14 +504,16 @@ impl SubscriberRedisStream {
             streams.insert(stream.name.clone(), stream.clone());
             fetchers.push(stream.clone());
         }
+        q.m_consumers.inc();
         Self {
             name,
             consumer,
-            consumer_id: q.consumer_id,
+            consumer_id: q.consumer_id.clone(),
             delay,
             fetchers,
             streams,
             m_sent: q.m_sent.clone(),
+            m_consumers: q.m_consumers.clone(),
             tx_fetch: q.tx_fetch.clone(),
             read_limit: q.read_limit,
         }
@@ -488,7 +539,7 @@ impl SubscriberRedisStream {
                     .map(|s| s.into_inner())
             };
             if let Some(mut stream) = stream {
-                let result = stream.fetch(noack, self.consumer_id).await;
+                let result = stream.fetch(noack, self.consumer_id.clone()).await;
                 match result {
                     Ok(msg) => {
                         let cx = msg.span.context();
@@ -503,10 +554,10 @@ impl SubscriberRedisStream {
                     }
                     Err(_) => {
                         stream.up();
-                        if stream.fail < 20 {
+                        if stream.fail.load(Ordering::Relaxed) < 20 {
                             self.fetchers.push(stream);
                         } else {
-                            let timeout = if stream.fail < 50 {
+                            let timeout = if stream.fail.load(Ordering::Relaxed) < 50 {
                                 Duration::from_millis(10)
                             } else {
                                 Duration::from_millis(20)
@@ -529,13 +580,13 @@ impl server::Subscriber for SubscriberRedisStream {
         self.name.clone()
     }
 
-    #[tracing::instrument(name = "subscriber.fetch", skip_all)]
+    #[tracing::instrument(name = "subscriber.fetch", skip_all, level = "trace")]
     async fn fetch(&mut self, deadline: SystemTime) -> Result<(), GenericError> {
         self.consumer.set_deadline(deadline);
         self.fetch_msg(true, tracing::Span::current()).await
     }
 
-    #[tracing::instrument(name = "subscriber.ack", skip_all)]
+    #[tracing::instrument(name = "subscriber.ack", skip_all, level = "trace")]
     async fn ack(&mut self, id: String, shard: String) -> Result<(), GenericError> {
         if let Some(s) = self.streams.get_mut(&shard) {
             s.ack(shard, id, self.consumer.get_id()).await?;
@@ -564,9 +615,10 @@ pub struct RedisStreamQueue {
     tx_pub: mpsc::Sender<Arc<Envelop>>,
     tx_fetch: mpsc::Sender<FetchCommand>,
     streams: Vec<RedisStreamR>,
-    consumer_id: Uuid,
+    consumer_id: String,
     m_received: GenericCounter<AtomicF64>,
     m_sent: GenericCounter<AtomicF64>,
+    m_consumers: GenericGauge<AtomicF64>,
     read_limit: usize,
 }
 
@@ -585,13 +637,14 @@ impl server::Queue for RedisStreamQueue {
             message.key = &msg.message.key,
         ),
         skip_all,
+        level = "trace",
     )]
     async fn publish(&self, msg: Arc<server::Envelop>) -> Result<(), PublishMessageError> {
-        let mut streams: Vec<_> = self.streams.iter().filter(|s| s.fail < 50).collect();
+        let mut streams: Vec<_> = self.streams.iter().collect();
         streams.shuffle(&mut rand::thread_rng());
         for stream in streams {
             if let Err(e) = stream.clone().insert(msg.clone()).await {
-                error!("Error while insert message to stream {}", e);
+                tracing::error!("Error while insert message to stream {}", e);
                 continue;
             } else {
                 self.m_received.inc();
@@ -601,7 +654,7 @@ impl server::Queue for RedisStreamQueue {
         self.tx_pub.send(msg).await.map_err(|_| PublishMessageError)
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, level = "trace")]
     async fn subscribe(
         &self,
         consumer: GenericConsumer,
@@ -630,13 +683,6 @@ impl RedisStreamQueue {
                 Stream::String(s) => RedisStream::new(connection.clone(), cfg.clone(), s.clone()),
             })
             .collect();
-        if cfg.init_group {
-            for stream in streams.iter().cloned() {
-                // tokio::spawn(stream.clone().clear_consumers());
-                tokio::spawn(stream.init_group());
-            }
-        }
-
         let (tx_pub, rx) = mpsc::channel(99);
         let name = cfg.name.clone();
         let m_received = metrics::QUEUE_COUNTER.with_label_values(&[&name, "received"]);
@@ -650,21 +696,25 @@ impl RedisStreamQueue {
         let (tx_fetch, rx) = mpsc::channel(99);
         let read_limit = cfg.read_limit.unwrap_or(streams.len() / 2);
         let name = cfg.name.clone();
+        let m_consumers = metrics::QUEUE_GAUGE.with_label_values(&[&name, "consumers"]);
         let m_sent = metrics::QUEUE_COUNTER.with_label_values(&[&name, "sent"]);
+        let hostname = gethostname::gethostname().to_string_lossy().to_string();
         tokio::spawn(Self::fetching(
             rx,
             streams.iter().cloned().collect(),
             task_tracker,
             m_sent.clone(),
+            hostname.clone(),
         ));
         Self {
             name,
             tx_pub,
             tx_fetch,
             streams,
-            consumer_id: Uuid::now_v7(),
+            consumer_id: hostname,
             m_received,
             m_sent,
+            m_consumers,
             read_limit,
         }
     }
@@ -724,6 +774,7 @@ impl RedisStreamQueue {
         mut readers: BinaryHeap<RedisStreamR>,
         task_tracker: TaskTracker,
         m_sent: GenericCounter<AtomicF64>,
+        queue_consumer_id: String,
     ) {
         let mut delay = DelayQueue::new();
         let mut tasks = JoinSet::new();
@@ -766,7 +817,7 @@ impl RedisStreamQueue {
                     m_sent.inc();
                 }
                 FetchCommand::GracefulShutdown => {
-                    if task_tracker.is_closed() {
+                    if task_tracker.is_closed() && tasks.is_empty() && waiters.is_empty() {
                         break;
                     }
                 }
@@ -793,8 +844,8 @@ impl RedisStreamQueue {
 
                 if let Some(mut stream) = stream {
                     let span = tracing::trace_span!(parent: &parent, "queue.task_fetch");
+                    let consumer_id = queue_consumer_id.clone();
                     tasks.spawn(async move {
-                        let consumer_id = consumer.get_id();
                         let noack = !consumer.is_ackable();
                         match stream.fetch(noack, consumer_id).instrument(span).await {
                             Ok(v) => FetchCommand::ValueStreamConsumer(v, stream, consumer),

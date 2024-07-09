@@ -137,6 +137,26 @@ pub struct RedisConfig {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct RedisStreamGroupCleanConfig {
+    #[serde(default)]
+    pub every: Duration,
+    pub max_idle: Duration,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(untagged)]
+pub enum RedisStreamGroupConfig {
+    Name(String),
+    Group {
+        name: String,
+        #[serde(default)]
+        init: bool,
+        #[serde(default)]
+        clear: Option<RedisStreamGroupCleanConfig>,
+    },
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct RedisStreamConfig {
     pub name: String,
     #[serde(default)]
@@ -147,9 +167,7 @@ pub struct RedisStreamConfig {
     pub maxlen: Option<usize>,
     #[serde(default)]
     pub limit: Option<usize>,
-    pub group: String,
-    #[serde(default)]
-    pub init_group: bool,
+    pub group: RedisStreamGroupConfig,
     #[serde(default)]
     pub nomkstream: bool,
     pub streams: Vec<Stream>,
