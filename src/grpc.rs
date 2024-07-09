@@ -76,6 +76,7 @@ struct InnerConsumer<T> {
 #[tonic::async_trait]
 trait TInnerConsumer {
     async fn send_message(self, msg: Arc<Envelop>) -> Result<(), SendMessageError>;
+    async fn send_fetch_timeout(&self, queue: String) -> Result<(), GenericError>;
 }
 
 #[tonic::async_trait]
@@ -90,6 +91,10 @@ impl TInnerConsumer for Arc<InnerConsumer<pb::SubscriptionResponse>> {
             .send(Ok(resp))
             .await
             .map_err(|_| SendMessageError)
+    }
+
+    async fn send_fetch_timeout(&self, _queue: String) -> Result<(), GenericError> {
+        unimplemented!("Subsciption api not supported timeout")
     }
 }
 
@@ -109,6 +114,15 @@ impl TInnerConsumer for Arc<InnerConsumer<pb::Response>> {
             .send(Ok(resp))
             .await
             .map_err(|_| SendMessageError)
+    }
+
+    async fn send_fetch_timeout(&self, queue: String) -> Result<(), GenericError> {
+        let fmt = pb::FetchMessageTimeout { queue };
+        let resp = pb::Response {
+            kind: Some(pb::response::Kind::FetchMessageTimeout(fmt)),
+        };
+        self.out_tx.send(Ok(resp)).await?;
+        Ok(())
     }
 }
 
@@ -203,8 +217,8 @@ where
             .unwrap_or_default()
     }
 
-    async fn send_timeout(&self, _msg: Arc<Envelop>) -> Result<(), SendMessageError> {
-        Ok(())
+    async fn send_timeout(&self, queue: String) -> Result<(), GenericError> {
+        self.inner.send_fetch_timeout(queue).await
     }
 
     fn generic_clone(&self) -> GenericConsumer {
