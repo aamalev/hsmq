@@ -274,7 +274,9 @@ where
 
     #[tracing::instrument(skip_all)]
     fn ack(&mut self, msg_id: String, unack: &mut server::UnAck) {
-        self.inner.prefetch_semaphore.add_permits(1);
+        if self.inner.prefetch_count > 0 {
+            self.inner.prefetch_semaphore.add_permits(1);
+        }
         unack.remove(&msg_id, false);
     }
 
