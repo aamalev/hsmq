@@ -453,13 +453,14 @@ impl StreaminCommand {
                 propagator.inject_context(&cx, &mut msg.headers)
             });
             let now = utils::current_time().as_secs_f64().to_string();
-            let msg_id = uuid::Uuid::now_v7();
+            let msg_id = uuid::Uuid::now_v7().to_string();
             msg.topic.clone_from(&topic);
-            msg.headers.insert("uuid".to_string(), msg_id.to_string());
+            msg.headers.insert("uuid".to_string(), msg_id.clone());
             msg.headers.insert("ts".to_string(), now);
             let cmd = pb::PublishMessage {
                 message: Some(msg),
                 qos,
+                request_id: msg_id,
             };
             let kind = Some(pb::request::Kind::PublishMessage(cmd));
             let req = pb::Request { kind };
