@@ -61,9 +61,11 @@ message MessageRequeue {
 message PublishMessage {
     Message message = 1;
     uint32 qos = 2;
+    string request_id = 3;
 }
 
 message PubAck {
+    string request_id = 1;
 }
 
 message FetchMessage {

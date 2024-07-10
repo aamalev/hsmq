@@ -526,6 +526,7 @@ impl GrpcStreaming {
             pb::request::Kind::PublishMessage(pb::PublishMessage {
                 message: Some(message),
                 qos,
+                request_id,
             }) => {
                 let span = tracing::trace_span!("publish");
                 let _ = span.enter();
@@ -537,7 +538,7 @@ impl GrpcStreaming {
                     subscription.publish(envelop).await;
                     self.m_publish_ok.inc();
                     if qos == 1 {
-                        let kind = Some(pb::response::Kind::PubAck(pb::PubAck {}));
+                        let kind = Some(pb::response::Kind::PubAck(pb::PubAck { request_id }));
                         self.out_tx.send(Ok(pb::Response { kind })).await?;
                     }
                 } else {
