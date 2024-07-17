@@ -545,7 +545,14 @@ impl GrpcStreaming {
                     }
                 } else {
                     self.m_publish_err.inc();
-                    return Err(Status::not_found("Subscribers not found"))?;
+                    let m = "Subscribers not found";
+                    let kind = Some(pb::response::Kind::PubError(pb::PubError {
+                        request_id,
+                        topic,
+                        info: m.to_string(),
+                    }));
+                    self.out_tx.send(Ok(pb::Response { kind })).await?;
+                    return Err(Status::not_found(m))?;
                 }
             }
             pb::request::Kind::SubscribeQueue(pb::SubscribeQueue {
@@ -584,10 +591,14 @@ impl GrpcStreaming {
                 autoack,
             }) => {
                 let deadline = SystemTime::now() + Duration::from_secs_f32(timeout);
-                if let Some(subscriber) = self.subs.get_mut(&queue) {
-                    if let Err(e) = subscriber.fetch(deadline).await {
-                        log::error!("Unexpected queue error {:?}", e);
-                    };
+                let fetch_result = if let Some(subscriber) = self.subs.get_mut(&queue) {
+                    subscriber.fetch(deadline).await.map_err(|e| {
+                        tracing::warn!("Unexpected error on queue {} {:?}", queue, e);
+                        pb::FetchMessageError {
+                            queue,
+                            info: "Error while fetch from queue".to_string(),
+                        }
+                    })
                 } else if let Some(qu) = self.queues.get_mut(&queue) {
                     let q = qu.generic_clone();
                     let consumer = GrpcConsumer::new_box(
@@ -599,11 +610,25 @@ impl GrpcStreaming {
                         autoack,
                     );
                     let mut subscriber = qu.subscribe(consumer).await?;
-                    if let Err(e) = subscriber.fetch(deadline).await {
-                        log::error!("Unexpected queue error {:?}", e);
-                    };
+                    let r = subscriber.fetch(deadline).await;
                     self.subs.insert(queue.clone(), subscriber);
-                }
+                    r.map_err(|e| {
+                        tracing::warn!("Unexpected error on queue {} {:?}", queue, e);
+                        pb::FetchMessageError {
+                            queue,
+                            info: "Error while fetch from queue".to_string(),
+                        }
+                    })
+                } else {
+                    Err(pb::FetchMessageError {
+                        queue,
+                        info: "Queue not found".to_string(),
+                    })
+                };
+                if let Err(e) = fetch_result {
+                    let kind = Some(pb::response::Kind::FetchMessageError(e));
+                    self.out_tx.send(Ok(pb::Response { kind })).await?;
+                };
             }
             k => log::error!("Unexpected for streaming kind {:?}", k),
         };
