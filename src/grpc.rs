@@ -81,7 +81,7 @@ trait TInnerConsumer {
 
 #[tonic::async_trait]
 impl TInnerConsumer for Arc<InnerConsumer<pb::SubscriptionResponse>> {
-    #[tracing::instrument(parent = &msg.span, skip_all)]
+    #[tracing::instrument(parent = &msg.span, skip_all, level = "debug")]
     async fn send_message(self, msg: Arc<Envelop>) -> Result<(), SendMessageError> {
         let m = msg.message.clone();
         let resp = pb::SubscriptionResponse {
@@ -100,7 +100,7 @@ impl TInnerConsumer for Arc<InnerConsumer<pb::SubscriptionResponse>> {
 
 #[tonic::async_trait]
 impl TInnerConsumer for Arc<InnerConsumer<pb::Response>> {
-    #[tracing::instrument(parent = &msg.span, skip_all)]
+    #[tracing::instrument(parent = &msg.span, skip_all, level = "debug")]
     async fn send_message(self, msg: Arc<Envelop>) -> Result<(), SendMessageError> {
         let mut meta = msg.meta.clone();
         meta.queue = self.q.get_name();
@@ -138,7 +138,7 @@ impl<T> Clone for GrpcConsumer<T> {
     fn clone(&self) -> Self {
         Self {
             id: self.id,
-            span: Some(tracing::info_span!("grpc::consume")),
+            span: Some(tracing::debug_span!("grpc::consume")),
             inner: self.inner.clone(),
             deadline: self.deadline,
         }
@@ -234,7 +234,7 @@ where
         }
     }
 
-    #[tracing::instrument(parent = &msg.span, skip_all)]
+    #[tracing::instrument(parent = &msg.span, skip_all, level = "debug")]
     fn send(
         &self,
         msg: Arc<Envelop>,
@@ -263,7 +263,7 @@ where
         None
     }
 
-    #[tracing::instrument(parent = &msg.span, skip_all)]
+    #[tracing::instrument(parent = &msg.span, skip_all, level = "debug")]
     async fn send_message(&self, msg: Arc<Envelop>) -> Result<(), SendMessageError> {
         let inner = self.inner.clone();
         let result = inner.send_message(msg).await;
@@ -272,7 +272,7 @@ where
             .inspect_err(|_| self.inner.m_consume_err.inc())
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, level = "debug")]
     fn ack(&mut self, msg_id: String, unack: &mut server::UnAck) {
         if self.inner.prefetch_count > 0 {
             self.inner.prefetch_semaphore.add_permits(1);
@@ -280,7 +280,7 @@ where
         unack.remove(&msg_id, false);
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, level = "debug")]
     async fn send_resp(&self, resp: server::Response) -> Result<(), GenericError> {
         self.inner.in_tx.send(resp)?;
         self.inner.m_buffer.inc();
@@ -297,7 +297,7 @@ where
 
 #[tonic::async_trait]
 impl hsmq_server::Hsmq for HsmqServer {
-    #[tracing::instrument(name = "publish", skip_all)]
+    #[tracing::instrument(name = "publish", skip_all, level = "debug")]
     async fn publish(&self, request: Request<Message>) -> HsmqResult<PublishResponse> {
         if self.task_tracker.is_closed() {
             return Err(Status::cancelled("shutdown"));
