@@ -630,6 +630,10 @@ impl GrpcStreaming {
                     self.out_tx.send(Ok(pb::Response { kind })).await?;
                 };
             }
+            pb::request::Kind::Ping(_) => {
+                let kind = Some(pb::response::Kind::Pong(pb::Pong {}));
+                self.out_tx.send(Ok(pb::Response { kind })).await?;
+            }
             k => log::error!("Unexpected for streaming kind {:?}", k),
         };
         Ok(())
