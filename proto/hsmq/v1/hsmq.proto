@@ -68,6 +68,12 @@ message PubAck {
     string request_id = 1;
 }
 
+message PubError {
+    string info = 1;
+    string topic = 2;
+    string request_id = 3;
+}
+
 message FetchMessage {
     string queue = 1;
     float timeout = 2;
@@ -76,6 +82,11 @@ message FetchMessage {
 
 message FetchMessageTimeout {
     string queue = 1;
+}
+
+message FetchMessageError {
+    string info = 1;
+    string queue = 2;
 }
 
 message Request {
@@ -94,6 +105,8 @@ message Response {
         Redirect redirect = 2;
         PubAck pub_ack = 3;
         FetchMessageTimeout fetch_message_timeout = 4;
+        FetchMessageError fetch_message_error = 5;
+        PubError pub_error = 6;
     }
 }
 
