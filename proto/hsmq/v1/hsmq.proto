@@ -23,6 +23,12 @@ message Redirect {
     string grpc_uri = 1;
 }
 
+message Ping {
+}
+
+message Pong {
+}
+
 message SubscribeQueueRequest {
     repeated string queues = 1;
 }
@@ -68,6 +74,12 @@ message PubAck {
     string request_id = 1;
 }
 
+message PubError {
+    string info = 1;
+    string topic = 2;
+    string request_id = 3;
+}
+
 message FetchMessage {
     string queue = 1;
     float timeout = 2;
@@ -78,6 +90,11 @@ message FetchMessageTimeout {
     string queue = 1;
 }
 
+message FetchMessageError {
+    string info = 1;
+    string queue = 2;
+}
+
 message Request {
     oneof kind {
         SubscribeQueue subscribe_queue = 1;
@@ -85,6 +102,7 @@ message Request {
         MessageRequeue message_requeue = 3;
         PublishMessage publish_message = 4;
         FetchMessage fetch_message = 5;
+        Ping ping = 6;
     }
 }
 
@@ -94,6 +112,9 @@ message Response {
         Redirect redirect = 2;
         PubAck pub_ack = 3;
         FetchMessageTimeout fetch_message_timeout = 4;
+        FetchMessageError fetch_message_error = 5;
+        PubError pub_error = 6;
+        Pong pong = 7;
     }
 }
 

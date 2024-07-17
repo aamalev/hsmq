@@ -29,6 +29,7 @@ impl Envelop {
             message.key = &message.key,
         ),
         skip_all,
+        level = "debug",
     )]
     pub fn new(message: Message) -> Self {
         let parent_cx =
@@ -80,7 +81,7 @@ impl Subscription {
         self.subs.push(queue);
     }
 
-    #[tracing::instrument(name = "subscription.publish", parent = &msg.span, skip_all)]
+    #[tracing::instrument(name = "subscription.publish", parent = &msg.span, skip_all, level = "debug")]
     pub async fn publish(&self, msg: Envelop) {
         let msg = Arc::new(msg);
         for q in self.subs.iter() {
@@ -256,7 +257,7 @@ impl Queue for InMemoryQueue {
         Box::new(self.clone())
     }
 
-    #[tracing::instrument(name = "InMemoryQueue.publish", parent = &msg.span, skip_all)]
+    #[tracing::instrument(name = "InMemoryQueue.publish", parent = &msg.span, skip_all, level = "debug")]
     async fn publish(&self, msg: Arc<Envelop>) -> Result<(), PublishMessageError> {
         Ok(self
             .tx
