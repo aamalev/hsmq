@@ -23,6 +23,12 @@ message Redirect {
     string grpc_uri = 1;
 }
 
+message Ping {
+}
+
+message Pong {
+}
+
 message SubscribeQueueRequest {
     repeated string queues = 1;
 }
@@ -96,6 +102,7 @@ message Request {
         MessageRequeue message_requeue = 3;
         PublishMessage publish_message = 4;
         FetchMessage fetch_message = 5;
+        Ping ping = 6;
     }
 }
 
@@ -107,6 +114,7 @@ message Response {
         FetchMessageTimeout fetch_message_timeout = 4;
         FetchMessageError fetch_message_error = 5;
         PubError pub_error = 6;
+        Pong pong = 7;
     }
 }
 
