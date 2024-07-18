@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::{
     config::{RedisStreamConfig, RedisStreamGroupCleanConfig, RedisStreamGroupConfig, Stream},
-    errors::{FetchMessageError, GenericError, PublishMessageError},
+    errors::{GenericError, PublishMessageError},
     metrics, pb,
     server::{
         self, ConsumerSendResult, Envelop, GenericConsumer, GenericQueue, GenericSubscriber,
