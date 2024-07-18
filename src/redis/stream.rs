@@ -525,8 +525,8 @@ impl SubscriberRedisStream {
         root_span: tracing::Span,
     ) -> Result<(), GenericError> {
         if self.consumer.is_dead() {
-            log::error!("Consumer deadline");
-            return Err(FetchMessageError)?;
+            self.consumer.send_timeout(self.name.clone()).await?;
+            return Ok(());
         }
         for _ in 0..self.read_limit {
             let stream = if let s @ Some(_) = self.fetchers.pop() {
@@ -554,6 +554,10 @@ impl SubscriberRedisStream {
                     }
                     Err(_) => {
                         stream.up();
+                        if self.consumer.is_dead() {
+                            self.consumer.send_timeout(self.name.clone()).await?;
+                            return Ok(());
+                        }
                         if stream.fail.load(Ordering::Relaxed) < 20 {
                             self.fetchers.push(stream);
                         } else {
@@ -700,6 +704,7 @@ impl RedisStreamQueue {
         let m_sent = metrics::QUEUE_COUNTER.with_label_values(&[&name, "sent"]);
         let hostname = gethostname::gethostname().to_string_lossy().to_string();
         tokio::spawn(Self::fetching(
+            name.clone(),
             rx,
             streams.iter().cloned().collect(),
             task_tracker,
@@ -770,6 +775,7 @@ impl RedisStreamQueue {
     }
 
     async fn fetching(
+        name: String,
         mut rx: mpsc::Receiver<FetchCommand>,
         mut readers: BinaryHeap<RedisStreamR>,
         task_tracker: TaskTracker,
@@ -825,6 +831,7 @@ impl RedisStreamQueue {
 
             while let Some(consumer) = waiters.pop_front() {
                 if consumer.is_dead() {
+                    let _ = consumer.send_timeout(name.clone()).await;
                     continue;
                 }
 
