@@ -40,6 +40,16 @@ pub struct Prometheus {
     pub labels: HashMap<String, String>,
 }
 
+impl Default for Prometheus {
+    fn default() -> Self {
+        Self {
+            url: default_metrics_path(),
+            http_address: None,
+            labels: Default::default(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct Cluster {
     pub name: String,

@@ -1,7 +1,6 @@
-use axum::{response::IntoResponse, routing, Router};
-use prometheus::proto::LabelPair;
-use prometheus::{Encoder, TextEncoder};
-use std::net::SocketAddr;
+use axum::{response::IntoResponse, routing, Json, Router};
+use prometheus::{proto::LabelPair, Encoder, TextEncoder};
+use std::{collections::HashMap, net::SocketAddr};
 use tokio_util::task::task_tracker::TaskTracker;
 
 use crate::config;
@@ -32,7 +31,14 @@ pub struct WebServer {
 }
 impl WebServer {
     pub fn new(addr: SocketAddr, task_tracker: TaskTracker) -> Self {
-        let router = Router::new();
+        let router = Router::new().route(
+            "/health",
+            routing::get(|| async {
+                let mut result = HashMap::new();
+                result.insert("status", "OK");
+                Json(result)
+            }),
+        );
         Self {
             addr,
             router,
@@ -64,5 +70,38 @@ impl WebServer {
             .await
             .unwrap();
         log::info!("Stopped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::Prometheus;
+
+    use super::WebServer;
+    use axum_test::TestServer;
+
+    impl Default for WebServer {
+        fn default() -> Self {
+            let addr = "0.0.0.0:0".parse().unwrap();
+            Self::new(addr, Default::default())
+        }
+    }
+
+    #[tokio::test]
+    async fn srv_health() {
+        let ws = WebServer::default();
+        let srv = TestServer::new(ws.router).unwrap();
+        let resp = srv.get("/health").await;
+        assert_eq!(resp.status_code(), 200);
+    }
+
+    #[tokio::test]
+    async fn srv_prometheus() {
+        let cfg = Prometheus::default();
+        let url = cfg.url.clone();
+        let ws = WebServer::default().serve_metrics(cfg);
+        let srv = TestServer::new(ws.router).unwrap();
+        let resp = srv.get(&url).await;
+        assert_eq!(resp.status_code(), 200);
     }
 }
