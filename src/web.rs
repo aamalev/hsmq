@@ -79,11 +79,17 @@ mod tests {
 
     use super::WebServer;
     use axum_test::TestServer;
-    use tokio_util::task::TaskTracker;
+
+    impl Default for WebServer {
+        fn default() -> Self {
+            let addr = "0.0.0.0:0".parse().unwrap();
+            Self::new(addr, Default::default())
+        }
+    }
 
     #[tokio::test]
     async fn srv_health() {
-        let ws = WebServer::new("0.0.0.0:0".parse().unwrap(), TaskTracker::new());
+        let ws = WebServer::default();
         let srv = TestServer::new(ws.router).unwrap();
         let resp = srv.get("/health").await;
         assert_eq!(resp.status_code(), 200);
@@ -93,8 +99,7 @@ mod tests {
     async fn srv_prometheus() {
         let cfg = Prometheus::default();
         let url = cfg.url.clone();
-        let ws =
-            WebServer::new("0.0.0.0:0".parse().unwrap(), TaskTracker::new()).serve_metrics(cfg);
+        let ws = WebServer::default().serve_metrics(cfg);
         let srv = TestServer::new(ws.router).unwrap();
         let resp = srv.get(&url).await;
         assert_eq!(resp.status_code(), 200);
