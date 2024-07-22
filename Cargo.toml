@@ -11,6 +11,7 @@ axum = { version = "0.7.5", features = ["ws", "http2"] }
 axum-test = "15.3.0"
 base64 = "0.22.0"
 clap = { version = "4.5.4", features = ["derive"] }
+consulrs = { version = "0.1.0", optional = true }
 env_logger = "0.11.3"
 futures = "0.3.30"
 gethostname = "0.4.3"
@@ -42,6 +43,7 @@ uuid = { version = "1.8.0", features = ["v4", "v7"] }
 tonic-build = "0.11"
 
 [features]
+consul = ["dep:consulrs"]
 default = ["redis", "redis-cluster"]
 redis = ["redis/tokio-comp"]
 redis-cluster = ["redis/cluster-async"]

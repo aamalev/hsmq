@@ -16,6 +16,17 @@ udp_port = 4848
 url = "/metrics"
 http_address = "0.0.0.0:8080"
 
+[consul]
+address = "http://127.0.0.1:8200"
+
+[consul.service]
+name = "hsmq"
+
+[consul.service.check]
+name = "health_check"
+interval = "10s"
+http = "http://localhost:8080/health"
+
 [[queues]]
 type = "InMemory"
 name = "a"
