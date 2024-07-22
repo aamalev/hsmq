@@ -9,6 +9,7 @@ Horizontal Scalable Message Queue Broker
 - [x] Configurable service
 - [x] Graceful shutdown
 - [x] Prometheus metrics
+- [x] Consul
 - [x] Declare queue params
 - [x] Console client hsmq-cli
     - [x] Publish
