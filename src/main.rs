@@ -97,10 +97,15 @@ async fn main() -> Result<(), GenericError> {
     };
 
     #[cfg(feature = "consul")]
-    if let Some(cfg) = cfg.consul {
+    let srv_consul = if let Some(cfg) = cfg.consul {
         let c = consul::Consul::new(cfg);
-        c.run().await;
+        if let Err(e) = c.start().await {
+            ::tracing::error!("Error consul start {:?}", e);
     }
+        Some(c)
+    } else {
+        None
+    };
 
     #[cfg(not(unix))]
     let shutdown = ctrl_c(true);
@@ -130,6 +135,13 @@ async fn main() -> Result<(), GenericError> {
 
     shutdown.await;
     task_tracker.close();
+
+    #[cfg(feature = "consul")]
+    if let Some(c) = srv_consul {
+        if let Err(e) = c.stop().await {
+            ::tracing::error!("Error consul stop {:?}", e);
+        }
+    }
 
     loop {
         tokio::select! {
