@@ -171,7 +171,7 @@ pub struct RedisConfig {
     #[cfg(not(feature = "redis-cluster"))]
     pub uri: String,
     #[serde(default)]
-    pub username: Option<String>,
+    pub username: Option<ResolvableValue>,
     #[serde(default)]
     pub password: Option<ResolvableValue>,
 }
