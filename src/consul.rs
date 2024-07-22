@@ -1,7 +1,7 @@
 use consulrs::api::check::common::AgentServiceCheckBuilder;
 use consulrs::api::service::requests::RegisterServiceRequest;
 use consulrs::client::{ConsulClient, ConsulClientSettingsBuilder};
-use consulrs::service;
+use consulrs::{error::ClientError, service};
 
 use crate::config;
 
@@ -22,7 +22,7 @@ impl Consul {
         Self { cfg, client }
     }
 
-    async fn service_register(&self, cfg: &config::ConsulService) {
+    async fn service_register(&self, cfg: &config::ConsulService) -> Result<(), ClientError> {
         let mut builder = RegisterServiceRequest::builder();
         if let Some(ref addr) = cfg.address {
             builder.address(addr);
@@ -34,19 +34,27 @@ impl Consul {
             let checker = AgentServiceCheckBuilder::default()
                 .name(check.name.as_str())
                 .interval(check.interval.as_str())
-                .http(check.http.as_str())
+                .http(String::from(check.http.clone()))
                 .status("passing")
                 .build()
                 .unwrap();
             builder.check(checker);
         }
-        let r = service::register(&self.client, &cfg.name, Some(&mut builder)).await;
-        tracing::warn!("Service registered with result {:?}", r);
+        service::register(&self.client, &cfg.name, Some(&mut builder)).await?;
+        Ok(())
     }
 
-    pub async fn run(self) {
+    pub async fn start(&self) -> Result<(), ClientError> {
         if let Some(ref cfg) = self.cfg.service {
-            self.service_register(cfg).await;
+            self.service_register(cfg).await?;
         }
+        Ok(())
+    }
+
+    pub async fn stop(&self) -> Result<(), ClientError> {
+        if let Some(ref cfg) = self.cfg.service {
+            service::deregister(&self.client, &cfg.name, None).await?;
+        }
+        Ok(())
     }
 }
