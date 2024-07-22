@@ -50,6 +50,36 @@ impl Default for Prometheus {
     }
 }
 
+#[cfg(feature = "consul")]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct ConsulServiceCheck {
+    pub name: String,
+    pub interval: String,
+    pub http: ResolvableValue,
+}
+
+#[cfg(feature = "consul")]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct ConsulService {
+    pub name: String,
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub check: Option<ConsulServiceCheck>,
+}
+
+#[cfg(feature = "consul")]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct Consul {
+    pub address: String,
+    #[serde(default)]
+    pub service: Option<ConsulService>,
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct Cluster {
     pub name: String,
@@ -137,6 +167,8 @@ pub struct Config {
     pub auth: Auth,
     #[serde(default)]
     pub users: HashMap<String, User>,
+    #[cfg(feature = "consul")]
+    pub consul: Option<Consul>,
 }
 
 impl Config {

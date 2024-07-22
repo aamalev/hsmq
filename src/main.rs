@@ -12,6 +12,9 @@ pub mod server;
 pub mod utils;
 pub mod web;
 
+#[cfg(feature = "consul")]
+pub mod consul;
+
 use clap::{command, Parser};
 use errors::GenericError;
 use std::path::PathBuf;
@@ -92,6 +95,12 @@ async fn main() -> Result<(), GenericError> {
         let w = cluster::Cluster::new(cluster_cfg, node_name, task_tracker.clone());
         tasks.spawn(w.run());
     };
+
+    #[cfg(feature = "consul")]
+    if let Some(cfg) = cfg.consul {
+        let c = consul::Consul::new(cfg);
+        c.run().await;
+    }
 
     #[cfg(not(unix))]
     let shutdown = ctrl_c(true);
