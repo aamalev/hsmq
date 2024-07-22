@@ -29,7 +29,7 @@ pub fn create_client(config: &RedisConfig) -> Result<Client, GenericError> {
             result.ok()
         })
         .map(|mut i| {
-            i.redis.username.clone_from(&config.username);
+            i.redis.username.clone_from(&config.username.clone().and_then(|r| r.resolve()));
             i.redis.password.clone_from(&password);
             i
         });
