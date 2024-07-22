@@ -3,7 +3,7 @@ use consulrs::api::service::requests::RegisterServiceRequest;
 use consulrs::client::{ConsulClient, ConsulClientSettingsBuilder};
 use consulrs::{error::ClientError, service};
 
-use crate::config;
+use crate::{config, errors::GenericError};
 
 pub struct Consul {
     cfg: config::Consul,
@@ -22,8 +22,11 @@ impl Consul {
         Self { cfg, client }
     }
 
-    async fn service_register(&self, cfg: &config::ConsulService) -> Result<(), ClientError> {
+    async fn service_register(&self, cfg: &config::ConsulService) -> Result<(), GenericError> {
         let mut builder = RegisterServiceRequest::builder();
+        if !cfg.tags.is_empty() {
+            builder.tags(cfg.tags.clone());
+        }
         if let Some(ref addr) = cfg.address {
             builder.address(addr);
         }
@@ -31,20 +34,25 @@ impl Consul {
             builder.port(port);
         }
         if let Some(ref check) = cfg.check {
-            let checker = AgentServiceCheckBuilder::default()
-                .name(check.name.as_str())
-                .interval(check.interval.as_str())
-                .http(String::from(check.http.clone()))
-                .status("passing")
-                .build()
-                .unwrap();
-            builder.check(checker);
+            let mut checker = AgentServiceCheckBuilder::default();
+            if let Some(grpc) = check.grpc.resolve() {
+                checker.grpc(String::from(grpc.clone()));
+            } else {
+                checker.http(String::from(check.http.clone()));
+            }
+            builder.check(
+                checker
+                    .name(check.name.as_str())
+                    .interval(check.interval.as_str())
+                    .status("passing")
+                    .build()?,
+            );
         }
         service::register(&self.client, &cfg.name, Some(&mut builder)).await?;
         Ok(())
     }
 
-    pub async fn start(&self) -> Result<(), ClientError> {
+    pub async fn start(&self) -> Result<(), GenericError> {
         if let Some(ref cfg) = self.cfg.service {
             self.service_register(cfg).await?;
         }

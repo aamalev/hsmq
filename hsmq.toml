@@ -25,7 +25,8 @@ name = "hsmq"
 [consul.service.check]
 name = "health_check"
 interval = "10s"
-http = "http://localhost:8080/health"
+grpc = "localhost:4848"
+# http = "http://localhost:8080/health"
 
 [[queues]]
 type = "InMemory"
