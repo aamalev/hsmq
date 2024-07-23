@@ -101,7 +101,7 @@ async fn main() -> Result<(), GenericError> {
         let c = consul::Consul::new(cfg);
         if let Err(e) = c.start().await {
             ::tracing::error!("Error consul start {:?}", e);
-    }
+        }
         Some(c)
     } else {
         None
