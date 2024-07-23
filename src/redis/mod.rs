@@ -17,7 +17,16 @@ type RedisConnection = redis::aio::MultiplexedConnection;
 
 #[cfg(feature = "redis-cluster")]
 pub fn create_client(config: &RedisConfig) -> Result<Client, GenericError> {
-    let password = config.password.clone().map(String::from);
+    let password = config
+        .password
+        .clone()
+        .map(String::from)
+        .filter(|s| !s.is_empty());
+    let username = config
+        .username
+        .clone()
+        .map(String::from)
+        .filter(|s| !s.is_empty());
     let nodes = config
         .nodes
         .iter()
@@ -29,7 +38,7 @@ pub fn create_client(config: &RedisConfig) -> Result<Client, GenericError> {
             result.ok()
         })
         .map(|mut i| {
-            i.redis.username.clone_from(&config.username.clone().and_then(|r| r.resolve()));
+            i.redis.username.clone_from(&username);
             i.redis.password.clone_from(&password);
             i
         });
