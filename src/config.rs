@@ -56,6 +56,7 @@ pub struct ConsulServiceCheck {
     pub name: String,
     pub interval: String,
     pub http: ResolvableValue,
+    pub grpc: ResolvableValue,
 }
 
 #[cfg(feature = "consul")]
