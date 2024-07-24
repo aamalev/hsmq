@@ -333,3 +333,37 @@ impl From<ResolvableValue> for String {
         value.resolve().unwrap_or_default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ResolvableValue;
+
+    #[tokio::test]
+    async fn resolve_env_empty() {
+        const ENV: &str = "resolve_env_empty";
+        std::env::remove_var(ENV);
+        let v = ResolvableValue::Env {
+            env: ENV.into(),
+            name: None,
+            default: None,
+            disable: false,
+        };
+        let result = v.resolve();
+        tracing::info!("Result {:?}", result);
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_env_exist_empty() {
+        const ENV: &str = "resolve_env_exist_empty";
+        std::env::set_var(ENV, "");
+        let v = ResolvableValue::Env {
+            env: ENV.into(),
+            name: None,
+            default: None,
+            disable: false,
+        };
+        let result = v.resolve();
+        assert!(result.is_some());
+    }
+}
