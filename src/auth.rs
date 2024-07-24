@@ -7,7 +7,8 @@ use crate::{config, errors::AuthError, jwt::JWT};
 #[derive(Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct Claims {
     pub sub: String,
-    pub exp: usize,
+    #[serde(default)]
+    pub exp: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -125,7 +126,7 @@ mod tests {
         cfg.jwt = Some(jwt);
         let auth = Auth::new(cfg);
         let mut claims = Claims::default();
-        claims.exp = (utils::current_time() + Duration::from_secs(3600)).as_secs() as usize;
+        claims.exp = Some((utils::current_time() + Duration::from_secs(3600)).as_secs() as usize);
         let token = auth
             .jwt
             .as_ref()

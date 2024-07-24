@@ -77,8 +77,11 @@ impl JWT {
         T: DeserializeOwned,
     {
         let mut e = JwtError::InitError;
+        let mut validation = Validation::default();
+        let required_spec: Vec<String> = vec![];
+        validation.set_required_spec_claims(&required_spec);
         for secret in self.secrets.iter() {
-            match decode(token, &secret.secret, &Validation::default()) {
+            match decode(token, &secret.secret, &validation) {
                 Ok(token) => {
                     JWT_COUNTER.with_label_values(&[&secret.name]).inc();
                     return Ok(token.claims);
@@ -103,7 +106,8 @@ mod tests {
 
     #[derive(Serialize, Deserialize, Default, Debug)]
     struct Claims {
-        exp: f64,
+        #[serde(default)]
+        exp: Option<f64>,
     }
 
     const SECRET: &str = "secret";
@@ -111,7 +115,7 @@ mod tests {
     #[tokio::test]
     async fn jwt_decode_ok() {
         let mut claims = Claims::default();
-        claims.exp = (utils::current_time() + Duration::from_secs(3600)).as_secs_f64();
+        claims.exp = Some((utils::current_time() + Duration::from_secs(3600)).as_secs_f64());
 
         let mut cfg = config::JWT::default();
         cfg.secrets
@@ -125,7 +129,8 @@ mod tests {
 
     #[tokio::test]
     async fn jwt_decode_expired() {
-        let claims = Claims::default();
+        let mut claims = Claims::default();
+        claims.exp = Some(0.0);
         let mut cfg = config::JWT::default();
         cfg.secrets
             .push(crate::config::ResolvableValue::Value(SECRET.to_string()));
