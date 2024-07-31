@@ -681,6 +681,11 @@ enum FetchCommand {
     GracefulShutdown,
 }
 
+enum PublishResult {
+    Stream(RedisStreamR),
+    GracefulShutdown,
+}
+
 #[derive(Debug, Clone)]
 pub struct RedisStreamQueue {
     pub name: String,
@@ -712,17 +717,6 @@ impl server::Queue for RedisStreamQueue {
         level = "trace",
     )]
     async fn publish(&self, msg: Arc<server::Envelop>) -> Result<(), PublishMessageError> {
-        let mut streams: Vec<_> = self.streams.iter().collect();
-        streams.shuffle(&mut rand::thread_rng());
-        for stream in streams {
-            if let Err(e) = stream.clone().insert(msg.clone()).await {
-                tracing::error!("Error while insert message to stream {}", e);
-                continue;
-            } else {
-                self.m_received.inc();
-                return Ok(());
-            };
-        }
         self.tx_pub.send(msg).await.map_err(|_| PublishMessageError)
     }
 
@@ -801,37 +795,53 @@ impl RedisStreamQueue {
         m_received: GenericCounter<AtomicF64>,
     ) {
         let mut tasks = JoinSet::new();
+        let mut messages = VecDeque::new();
         loop {
             if tasks.is_empty() {
                 tasks.spawn(async {
                     tokio::time::sleep(Duration::from_secs(3)).await;
-                    ConsumerSendResult::GracefulShutdown
+                    PublishResult::GracefulShutdown
                 });
             }
             tokio::select! {
                 Some(msg) = rx.recv() => {
-                    log::debug!("Received msg {:?}", &msg);
-                    m_received.inc();
-                    if let Some(mut stream) = writers.pop_front() {
-                        if let Err(e) = stream.insert(msg).await {
-                            log::error!("Error insert {e}");
-                        }
-                        writers.push_back(stream);
-                    }
+                    tracing::debug!("Received {} msg {:?}", messages.len(), &msg);
+                    messages.push_back(msg);
                 }
                 Some(res) = tasks.join_next() => {
                     match res {
-                        Ok(ConsumerSendResult::GracefulShutdown) => {
+                        Ok(PublishResult::GracefulShutdown) => {
                             if task_tracker.is_closed() {
                                 break;
                             }
                         }
-                        Ok(r) => log::error!("Not impl for {:?}", r),
+                        Ok(PublishResult::Stream(s)) => {
+                            writers.push_back(s);
+                        }
                         Err(e) => {
-                            log::error!("Error in task queue {}", e);
+                            tracing::error!("Error in task queue {}", e);
                         }
                     };
                 }
+            }
+            while !messages.is_empty() && !writers.is_empty() {
+                if let Some(msg) = messages.pop_front() {
+                    if let Some(mut stream) = writers.pop_front() {
+                        tracing::debug!("Process msg, writers {}", writers.len());
+                        let m_received = m_received.clone();
+                        tasks.spawn(async move {
+                            if let Err(e) = stream.insert(msg).await {
+                                tracing::error!(error = &e as &dyn std::error::Error, "Error insert");
+                            } else {
+                                m_received.inc();
+                            }
+                            tracing::debug!("Send msg");
+                            PublishResult::Stream(stream)
+                        });
+                    }
+                    
+                }
+                
             }
         }
     }
