@@ -94,6 +94,27 @@ pub struct Sentry {
     pub dsn: Option<std::borrow::Cow<'static, str>>,
     #[serde(default)]
     pub env: Option<std::borrow::Cow<'static, str>>,
+    #[serde(default)]
+    pub sample_rate: Option<f32>,
+    #[serde(default)]
+    pub traces_sample_rate: f32,
+    #[serde(default)]
+    pub max_breadcrumbs: Option<usize>,
+}
+
+#[cfg(feature = "sentry")]
+impl From<Sentry> for sentry::ClientOptions {
+    fn from(value: Sentry) -> Self {
+        let mut result = Self {
+            release: sentry::release_name!(),
+            environment: value.env,
+            ..Default::default()
+        };
+        result.sample_rate = value.sample_rate.unwrap_or(result.sample_rate);
+        result.traces_sample_rate = value.traces_sample_rate;
+        result.max_breadcrumbs = value.max_breadcrumbs.unwrap_or(result.max_breadcrumbs);
+        result
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
