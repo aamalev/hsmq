@@ -11,6 +11,12 @@ secrets = [
 [tracing]
 level = "INFO"
 
+# [sentry]
+# dsn = ""
+# env = "development"
+# sample_rate = 1.0
+# traces_sample_rate = 1.0
+
 [cluster]
 name = "c1"
 udp_port = 4848
