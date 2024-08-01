@@ -57,6 +57,20 @@ fn main() -> Result<(), GenericError> {
         Config::default()
     };
 
+    #[cfg(feature = "sentry")]
+    let _guard = {
+        let cfg = cfg.sentry.clone();
+        sentry::init((
+            cfg.dsn,
+            sentry::ClientOptions {
+                release: sentry::release_name!(),
+                environment: cfg.env,
+                traces_sample_rate: 1.0,
+                ..Default::default()
+            },
+        ))
+    };
+
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?

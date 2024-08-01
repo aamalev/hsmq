@@ -87,6 +87,15 @@ pub struct Consul {
     pub service: Option<ConsulService>,
 }
 
+#[cfg(feature = "sentry")]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+pub struct Sentry {
+    #[serde(default)]
+    pub dsn: Option<std::borrow::Cow<'static, str>>,
+    #[serde(default)]
+    pub env: Option<std::borrow::Cow<'static, str>>,
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct Cluster {
     pub name: String,
@@ -175,6 +184,9 @@ pub struct Config {
     pub auth: Auth,
     #[serde(default)]
     pub users: HashMap<String, User>,
+    #[cfg(feature = "sentry")]
+    #[serde(default)]
+    pub sentry: Sentry,
     #[cfg(feature = "consul")]
     pub consul: Option<Consul>,
 }
