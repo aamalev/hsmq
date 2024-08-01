@@ -8,6 +8,9 @@ secrets = [
     { env = "JWT_SECRET" }, # secret from environment variable
 ]
 
+[tracing]
+level = "INFO"
+
 [cluster]
 name = "c1"
 udp_port = 4848

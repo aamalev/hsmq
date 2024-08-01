@@ -50,6 +50,12 @@ impl Default for Prometheus {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+pub struct Tracing {
+    #[serde(default)]
+    pub level: Option<String>,
+}
+
 #[cfg(feature = "consul")]
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct ConsulServiceCheck {
@@ -160,6 +166,7 @@ pub struct InMemoryQueue {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct Config {
     pub node: Node,
+    pub tracing: Option<Tracing>,
     pub prometheus: Option<Prometheus>,
     pub cluster: Option<Cluster>,
     #[serde(default)]
