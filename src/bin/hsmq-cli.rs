@@ -29,6 +29,11 @@ pub mod config;
 use crate::cluster::{JwtPackage, Package};
 use crate::config::Config;
 
+#[path = ".."]
+mod hsmq {
+    pub mod tracing;
+}
+
 #[path = "../utils.rs"]
 pub mod utils;
 
@@ -171,6 +176,8 @@ impl Cli {
         } else {
             Config::default()
         };
+        hsmq::tracing::init_subscriber(&cfg)?;
+
         let mut grpc_addr = if let Some(ref grpc_uri) = self.grpc_uri {
             grpc_uri.to_string()
         } else {
@@ -774,11 +781,11 @@ impl ClusterCommand {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::init();
     let cli = Cli::parse();
 
     cli.run().await?;
 
+    opentelemetry::global::shutdown_tracer_provider();
     Ok(())
 }
 
