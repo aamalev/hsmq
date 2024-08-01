@@ -16,6 +16,7 @@ level = "INFO"
 # env = "development"
 # sample_rate = 1.0
 # traces_sample_rate = 1.0
+# max_breadcrumbs = 5
 
 [cluster]
 name = "c1"
