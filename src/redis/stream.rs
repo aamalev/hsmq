@@ -1,6 +1,6 @@
 use opentelemetry::trace::FutureExt;
 use prometheus::core::{AtomicF64, GenericCounter, GenericGauge};
-use rand::{seq::SliceRandom, Rng};
+use rand::Rng;
 use redis::{aio::ConnectionLike, RedisResult};
 use std::{
     collections::{BinaryHeap, HashMap, VecDeque},
@@ -25,10 +25,7 @@ use crate::{
     config::{RedisStreamConfig, RedisStreamGroupCleanConfig, RedisStreamGroupConfig, Stream},
     errors::{GenericError, PublishMessageError},
     metrics, pb,
-    server::{
-        self, ConsumerSendResult, Envelop, GenericConsumer, GenericQueue, GenericSubscriber,
-        QueueCommand,
-    },
+    server::{self, Envelop, GenericConsumer, GenericQueue, GenericSubscriber, QueueCommand},
     utils,
 };
 
@@ -661,7 +658,7 @@ impl server::Subscriber for Subscriber {
             s.ack(shard, id, self.consumer_id).await?;
         }
         if self.prefetch_count > 0 {
-        let root = tracing::trace_span!(parent: None, "subscriber.fetch");
+            let root = tracing::trace_span!(parent: None, "subscriber.fetch");
             self.tx.send((root, None)).await?;
         }
         Ok(())
@@ -693,7 +690,6 @@ pub struct RedisStreamQueue {
     tx_fetch: mpsc::Sender<FetchCommand>,
     streams: Vec<RedisStreamR>,
     consumer_id: String,
-    m_received: GenericCounter<AtomicF64>,
     m_sent: GenericCounter<AtomicF64>,
     m_consumers: GenericGauge<AtomicF64>,
     read_limit: usize,
@@ -750,7 +746,7 @@ impl RedisStreamQueue {
             rx,
             task_tracker.clone(),
             streams.iter().cloned().collect(),
-            m_received.clone(),
+            m_received,
         ));
 
         let (tx_fetch, rx) = mpsc::channel(99);
@@ -773,7 +769,6 @@ impl RedisStreamQueue {
             tx_fetch,
             streams,
             consumer_id: hostname,
-            m_received,
             m_sent,
             m_consumers,
             read_limit,
@@ -831,7 +826,10 @@ impl RedisStreamQueue {
                         let m_received = m_received.clone();
                         tasks.spawn(async move {
                             if let Err(e) = stream.insert(msg).await {
-                                tracing::error!(error = &e as &dyn std::error::Error, "Error insert");
+                                tracing::error!(
+                                    error = &e as &dyn std::error::Error,
+                                    "Error insert"
+                                );
                             } else {
                                 m_received.inc();
                             }
@@ -839,9 +837,7 @@ impl RedisStreamQueue {
                             PublishResult::Stream(stream)
                         });
                     }
-                    
                 }
-                
             }
         }
     }
