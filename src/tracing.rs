@@ -17,6 +17,10 @@ pub fn init_subscriber(cfg: &config::Config) -> Result<(), GenericError> {
     let registry = tracing_subscriber::registry()
         .with(fltr)
         .with(tracing_subscriber::fmt::layer());
+
+    #[cfg(feature = "sentry")]
+    let registry = registry.with(sentry_tracing::layer());
+
     registry.init();
     Ok(())
 }
