@@ -50,6 +50,12 @@ impl Default for Prometheus {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+pub struct Tracing {
+    #[serde(default)]
+    pub level: Option<String>,
+}
+
 #[cfg(feature = "consul")]
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct ConsulServiceCheck {
@@ -79,6 +85,15 @@ pub struct Consul {
     pub address: String,
     #[serde(default)]
     pub service: Option<ConsulService>,
+}
+
+#[cfg(feature = "sentry")]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+pub struct Sentry {
+    #[serde(default)]
+    pub dsn: Option<std::borrow::Cow<'static, str>>,
+    #[serde(default)]
+    pub env: Option<std::borrow::Cow<'static, str>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
@@ -227,6 +242,7 @@ impl RedisStreamConfig {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct Config {
     pub node: Node,
+    pub tracing: Option<Tracing>,
     pub prometheus: Option<Prometheus>,
     pub cluster: Option<Cluster>,
     #[serde(default)]
@@ -235,6 +251,9 @@ pub struct Config {
     pub auth: Auth,
     #[serde(default)]
     pub users: HashMap<String, User>,
+    #[cfg(feature = "sentry")]
+    #[serde(default)]
+    pub sentry: Sentry,
     #[cfg(feature = "consul")]
     pub consul: Option<Consul>,
     pub redis: HashMap<String, RedisConfig>,

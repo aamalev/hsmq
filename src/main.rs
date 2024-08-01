@@ -9,6 +9,7 @@ pub mod grpc;
 pub mod jwt;
 pub mod metrics;
 pub mod server;
+pub mod tracing;
 pub mod utils;
 pub mod web;
 
@@ -50,9 +51,7 @@ async fn ctrl_c(graceful: bool) {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), GenericError> {
-    env_logger::init();
+fn main() -> Result<(), GenericError> {
     let cli = Cli::parse();
 
     let cfg = if let Some(config_path) = cli.config.as_deref() {
@@ -60,6 +59,32 @@ async fn main() -> Result<(), GenericError> {
     } else {
         Config::default()
     };
+
+    #[cfg(feature = "sentry")]
+    let _guard = {
+        let cfg = cfg.sentry.clone();
+        sentry::init((
+            cfg.dsn,
+            sentry::ClientOptions {
+                release: sentry::release_name!(),
+                environment: cfg.env,
+                traces_sample_rate: 1.0,
+                ..Default::default()
+            },
+        ))
+    };
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(cli, cfg))?;
+
+    opentelemetry::global::shutdown_tracer_provider();
+    Ok(())
+}
+
+async fn run(_cli: Cli, cfg: Config) -> Result<(), GenericError> {
+    crate::tracing::init_subscriber(&cfg)?;
 
     let hostname = gethostname::gethostname().to_string_lossy().to_string();
 
