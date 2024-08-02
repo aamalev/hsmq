@@ -474,18 +474,27 @@ impl GrpcStreaming {
         let m_buffer = metrics::GRPC_GAUGE.with_label_values(&["buffer"]);
         loop {
             tokio::select! {
-                Some(result) = self.in_stream.next() => {
+                result = self.in_stream.next() => {
                     match result {
-                        Ok(request) => {
-                            if let Some(kind) = request.kind {
-                                if let Err(e) = self.req_kind(kind).await {
-                                    log::error!("Error kind of request {:?}", e);
+                        Some(result) => match result {
+                            Ok(request) => {
+                                if let Some(kind) = request.kind {
+                                    if let Err(e) = self.req_kind(kind).await {
+                                        log::error!("Error kind of request {:?}", e);
+                                    }
                                 }
                             }
+                            Err(e) => {
+                                log::debug!("Error in stream {}", e);
+                                self.consume_stop().await;
+                                drop(self);
+                                break;
+                            }
                         }
-                        Err(e) => {
-                            log::debug!("Error in stream {}", e);
+                        None => {
+                            tracing::info!("Streaming stop");
                             self.consume_stop().await;
+                            drop(self);
                             break;
                         }
                     }
