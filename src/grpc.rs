@@ -492,7 +492,7 @@ impl GrpcStreaming {
                             }
                         }
                         None => {
-                            tracing::info!("Streaming stop");
+                            tracing::debug!("Streaming stop");
                             self.consume_stop().await;
                             drop(self);
                             break;
