@@ -315,7 +315,7 @@ impl RedisStreamR {
             connection.req_packed_command(&cmd).await?;
         }
         if idles.is_empty() {
-            tracing::info!("[{}] No idle consumers", name);
+            tracing::debug!("[{}] No idle consumers", name);
         } else {
             tracing::info!("[{}] Deleted {} idle consumers", name, idles.len());
         }
@@ -592,7 +592,7 @@ impl Drop for Subscriber {
 
 impl Subscriber {
     fn new(q: &RedisStreamQueue, consumer: GenericConsumer) -> Self {
-        tracing::info!("New subscriber");
+        tracing::debug!("New subscriber");
         let mut streams = HashMap::new();
         for stream in q.streams.iter() {
             streams.insert(stream.name.clone(), stream.clone());
@@ -622,7 +622,7 @@ impl Subscriber {
         mut rx: mpsc::Receiver<(tracing::Span, Option<SystemTime>)>,
         prefetch_span: tracing::Span,
     ) -> Result<(), GenericError> {
-        tracing::info!("Start consume");
+        tracing::debug!("Start consume");
         let autoack = !subscriber.consumer.is_ackable();
         let prefetch_count = subscriber.consumer.get_prefetch_count();
 
