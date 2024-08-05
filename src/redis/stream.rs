@@ -19,7 +19,6 @@ use tokio_stream::StreamExt;
 use tokio_util::{task::TaskTracker, time::DelayQueue};
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-use uuid::Uuid;
 
 use crate::{
     config::{RedisStreamConfig, RedisStreamGroupCleanConfig, RedisStreamGroupConfig, Stream},
@@ -458,12 +457,7 @@ impl RedisStreamR {
         skip_all,
         level = "trace",
     )]
-    async fn ack(
-        &mut self,
-        stream: String,
-        id: String,
-        _consumer_id: Uuid,
-    ) -> Result<bool, redis::RedisError> {
+    async fn ack(&mut self, stream: String, id: String) -> Result<bool, redis::RedisError> {
         let cmd = redis::cmd("XACK")
             .arg(&stream)
             .arg(&self.group)
@@ -577,16 +571,17 @@ impl SubscriberRedisStream {
 #[derive(Debug)]
 struct Subscriber {
     name: String,
-    task: JoinHandle<()>,
     prefetch_count: usize,
-    tx: mpsc::Sender<(tracing::Span, Option<SystemTime>)>,
-    consumer_id: Uuid,
-    streams: HashMap<String, RedisStreamR>,
+    tx_fetch: mpsc::Sender<(tracing::Span, Option<SystemTime>)>,
+    task_fetch: JoinHandle<()>,
+    tx_ack: mpsc::Sender<(String, String)>,
+    task_ack: JoinHandle<()>,
 }
 
 impl Drop for Subscriber {
     fn drop(&mut self) {
-        self.task.abort();
+        self.task_fetch.abort();
+        self.task_ack.abort();
     }
 }
 
@@ -599,22 +594,27 @@ impl Subscriber {
         }
         let (tx, rx) = mpsc::channel(99);
         let name = q.name.clone();
-        let consumer_id = consumer.get_id();
         let prefetch_count = consumer.get_prefetch_count();
         let inner = SubscriberRedisStream::new(q, consumer);
         let root = tracing::Span::current();
-        let task = tokio::spawn(async {
+        let task_fetch = tokio::spawn(async {
             if let Err(e) = Self::consume(inner, rx, root).await {
-                tracing::error!(error = e, "Subscriber disabled");
+                tracing::error!(error = e, "Subscriber fetch disabled");
+            }
+        });
+        let (tx_ack, rx_ack) = mpsc::channel(99);
+        let task_ack = tokio::spawn(async {
+            if let Err(e) = Self::ack(streams, rx_ack).await {
+                tracing::error!(error = e, "Subscriber ack disabled");
             }
         });
         Self {
             name,
             prefetch_count,
-            task,
-            tx,
-            streams,
-            consumer_id,
+            tx_fetch: tx,
+            task_fetch,
+            tx_ack,
+            task_ack,
         }
     }
     async fn consume(
@@ -637,6 +637,19 @@ impl Subscriber {
         }
         Ok(())
     }
+    async fn ack(
+        mut streams: HashMap<String, RedisStreamR>,
+        mut rx: mpsc::Receiver<(String, String)>,
+    ) -> Result<(), GenericError> {
+        while let Some((shard, id)) = rx.recv().await {
+            if let Some(s) = streams.get_mut(&shard) {
+                if let Err(e) = s.ack(shard, id).await {
+                    tracing::error!(error = &e as &dyn std::error::Error, "Error ack");
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[tonic::async_trait]
@@ -648,18 +661,16 @@ impl server::Subscriber for Subscriber {
     #[tracing::instrument(name = "subscriber.fetch", skip_all, level = "trace")]
     async fn fetch(&mut self, deadline: SystemTime) -> Result<(), GenericError> {
         let span = tracing::Span::current();
-        self.tx.send((span, Some(deadline))).await?;
+        self.tx_fetch.send((span, Some(deadline))).await?;
         Ok(())
     }
 
     #[tracing::instrument(name = "subscriber.ack", skip_all, level = "trace")]
     async fn ack(&mut self, id: String, shard: String) -> Result<(), GenericError> {
-        if let Some(s) = self.streams.get_mut(&shard) {
-            s.ack(shard, id, self.consumer_id).await?;
-        }
+        self.tx_ack.send((shard, id)).await?;
         if self.prefetch_count > 0 {
             let root = tracing::trace_span!(parent: None, "subscriber.fetch");
-            self.tx.send((root, None)).await?;
+            self.tx_fetch.send((root, None)).await?;
         }
         Ok(())
     }
@@ -749,7 +760,7 @@ impl RedisStreamQueue {
             m_received,
         ));
 
-        let (tx_fetch, rx) = mpsc::channel(99);
+        let (tx_fetch, rx_fetch) = mpsc::channel(99);
         let read_limit = cfg.read_limit.unwrap_or(streams.len() / 2);
         let name = cfg.name.clone();
         let m_consumers = metrics::QUEUE_GAUGE.with_label_values(&[&name, "consumers"]);
@@ -757,7 +768,7 @@ impl RedisStreamQueue {
         let hostname = gethostname::gethostname().to_string_lossy().to_string();
         tokio::spawn(Self::fetching(
             name.clone(),
-            rx,
+            rx_fetch,
             streams.iter().cloned().collect(),
             task_tracker,
             m_sent.clone(),
