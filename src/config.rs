@@ -5,6 +5,9 @@ use std::io::Read;
 use std::net::SocketAddr;
 use std::path::Path;
 
+#[cfg(feature = "sentry")]
+use sentry::IntoDsn;
+
 fn default_grpc_addr() -> Option<SocketAddr> {
     "0.0.0.0:4848".parse().ok()
 }
@@ -106,6 +109,7 @@ pub struct Sentry {
 impl From<Sentry> for sentry::ClientOptions {
     fn from(value: Sentry) -> Self {
         let mut result = Self {
+            dsn: value.dsn.and_then(|dsn| dsn.into_dsn().unwrap_or_default()),
             release: sentry::release_name!(),
             environment: value.env,
             ..Default::default()
