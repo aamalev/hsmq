@@ -30,6 +30,8 @@ use crate::{
 
 use super::RedisConnection;
 
+const TYPE_URL_STRING: &str = "type.googleapis.com/google.protobuf.StringValue";
+
 #[allow(dead_code)]
 fn cmd_to_string(cmd: redis::Cmd) -> String {
     let s = cmd.args_iter().map(|a| match a {
@@ -357,7 +359,10 @@ impl RedisStreamR {
         }
         if let Some(ref data) = msg.message.data {
             cmd.arg(&self.inner.cfg.body_fieldname).arg(&data.value);
-            cmd.arg(b"content-type").arg(&data.type_url);
+            if !(data.type_url.is_empty() || data.type_url.eq(TYPE_URL_STRING)) {
+                cmd.arg(&self.inner.cfg.body_type_fieldname)
+                    .arg(&data.type_url);
+            }
         }
         self.inner.m_xadd.inc();
         let msg_id = self.execute::<String>(cmd).await?;
@@ -413,8 +418,12 @@ impl RedisStreamR {
                                     msg.key = String::from_utf8_lossy(&key).to_string();
                                 }
                                 let mut data = prost_types::Any::default();
-                                if let Some(ct) = headers.remove("content-type") {
+                                if let Some(ct) =
+                                    headers.remove(&self.inner.cfg.body_type_fieldname)
+                                {
                                     data.type_url = String::from_utf8_lossy(&ct).to_string();
+                                } else {
+                                    data.type_url = TYPE_URL_STRING.to_string();
                                 }
                                 if let Some(body) = headers.remove(&self.inner.cfg.body_fieldname) {
                                     data.value = body;
@@ -952,6 +961,7 @@ mod tests {
                 nomkstream: Default::default(),
                 streams: Default::default(),
                 body_fieldname: RedisStreamConfig::default_body_fieldname(),
+                body_type_fieldname: RedisStreamConfig::default_body_type_fieldname(),
                 read_limit: Default::default(),
             }
         }
