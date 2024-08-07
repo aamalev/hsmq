@@ -255,7 +255,7 @@ pub struct RedisStreamConfig {
 }
 
 impl RedisStreamConfig {
-    fn default_body_fieldname() -> String {
+    pub fn default_body_fieldname() -> String {
         "body".to_string()
     }
 }

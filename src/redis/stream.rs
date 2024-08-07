@@ -74,15 +74,12 @@ impl redis::FromRedisValue for RedisConsumer {
     }
 }
 
-#[derive(Clone)]
-struct RedisStream<T> {
-    order_id: T,
-    connection: crate::redis::RedisConnection,
+#[derive(Debug)]
+struct RedisStreamInner {
     cfg: RedisStreamConfig,
     name: String,
     group: String,
-    fail: Arc<AtomicU64>,
-    m_sleep: GenericCounter<AtomicF64>,
+    fail: AtomicU64,
     m_xadd: GenericCounter<AtomicF64>,
     m_xread: GenericCounter<AtomicF64>,
     m_xread_nil: GenericCounter<AtomicF64>,
@@ -90,64 +87,91 @@ struct RedisStream<T> {
     m_xack: GenericCounter<AtomicF64>,
 }
 
-impl<T> Debug for RedisStream<T> {
+impl RedisStreamInner {
+    fn new(cfg: RedisStreamConfig, name: String, group: String) -> Self {
+        let m_xadd = metrics::REDIS_COUNTER.with_label_values(&[&name, "XADD"]);
+        let m_xread = metrics::REDIS_COUNTER.with_label_values(&[&name, "XREADGROUP"]);
+        let m_xread_nil = metrics::REDIS_COUNTER.with_label_values(&[&name, "XREADGROUP-NIL"]);
+        let m_xread_err = metrics::REDIS_COUNTER.with_label_values(&[&name, "XREADGROUP-ERR"]);
+        let m_xack = metrics::REDIS_COUNTER.with_label_values(&[&name, "XACK"]);
+        Self {
+            cfg,
+            name,
+            group,
+            fail: Default::default(),
+            m_xadd,
+            m_xread,
+            m_xread_nil,
+            m_xread_err,
+            m_xack,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RedisStream<T, C> {
+    order_id: T,
+    connection: C,
+    inner: Arc<RedisStreamInner>,
+}
+
+impl<T: std::fmt::Debug, C> Debug for RedisStream<T, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RedisStream")
-            // .field("order_id", &self.order_id)
-            .field("name", &self.name)
-            .field("fail", &self.fail)
+            .field("name", &self.inner.name)
+            .field("order_id", &self.order_id)
+            .field("fail", &self.inner.fail)
             .finish()
     }
 }
 
-impl PartialEq for RedisStream<Arc<AtomicU64>> {
+impl<C> PartialEq for RedisStream<Arc<AtomicU64>, C> {
     fn eq(&self, other: &Self) -> bool {
         self.order_id.load(Ordering::Relaxed) == other.order_id.load(Ordering::Relaxed)
     }
 }
 
-impl Eq for RedisStream<Arc<AtomicU64>> {}
+impl<C> Eq for RedisStream<Arc<AtomicU64>, C> {}
 
-impl PartialOrd for RedisStream<Arc<AtomicU64>> {
+impl<C> PartialOrd for RedisStream<Arc<AtomicU64>, C> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for RedisStream<Arc<AtomicU64>> {
+impl<C> Ord for RedisStream<Arc<AtomicU64>, C> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.order_id
             .load(Ordering::Relaxed)
             .cmp(&other.order_id.load(Ordering::Relaxed))
-            .reverse()
     }
 }
 
-impl PartialEq for RedisStream<String> {
+impl<C> PartialEq for RedisStream<String, C> {
     fn eq(&self, other: &Self) -> bool {
         self.order_id == other.order_id
     }
 }
 
-impl Eq for RedisStream<String> {}
+impl<C> Eq for RedisStream<String, C> {}
 
-impl PartialOrd for RedisStream<String> {
+impl<C> PartialOrd for RedisStream<String, C> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for RedisStream<String> {
+impl<C> Ord for RedisStream<String, C> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.order_id.cmp(&other.order_id).reverse()
+        self.order_id.cmp(&other.order_id)
     }
 }
 
-impl<T> Display for RedisStream<T> {
+impl<T, C> Display for RedisStream<T, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&format!(
             "<RedisStream {} group={}>",
-            &self.name, &self.group,
+            &self.inner.name, &self.inner.group,
         ))
     }
 }
@@ -157,7 +181,7 @@ trait OrderId {
     fn set_order_str(&mut self, msg_id: &str);
 }
 
-impl OrderId for RedisStream<String> {
+impl<C> OrderId for RedisStream<String, C> {
     fn set_order_u64(&mut self, ms: u64) {
         self.order_id = ms.to_string();
     }
@@ -166,7 +190,7 @@ impl OrderId for RedisStream<String> {
     }
 }
 
-impl OrderId for RedisStream<Arc<AtomicU64>> {
+impl<C> OrderId for RedisStream<Arc<AtomicU64>, C> {
     fn set_order_u64(&mut self, ms: u64) {
         self.order_id.store(ms, Ordering::Relaxed);
     }
@@ -181,10 +205,10 @@ impl OrderId for RedisStream<Arc<AtomicU64>> {
 }
 
 #[cfg(feature = "redis-stream-order-atomic")]
-type RedisStreamR = RedisStream<Arc<AtomicU64>>;
+type RedisStreamR = RedisStream<Arc<AtomicU64>, crate::redis::RedisConnection>;
 
 #[cfg(not(feature = "redis-stream-order-atomic"))]
-type RedisStreamR = RedisStream<String>;
+type RedisStreamR = RedisStream<String, crate::redis::RedisConnection>;
 
 impl RedisStreamR {
     fn new(
@@ -192,12 +216,6 @@ impl RedisStreamR {
         cfg: RedisStreamConfig,
         name: String,
     ) -> Self {
-        let m_sleep = metrics::REDIS_COUNTER.with_label_values(&[&name, "stream-sleep"]);
-        let m_xadd = metrics::REDIS_COUNTER.with_label_values(&[&name, "XADD"]);
-        let m_xread = metrics::REDIS_COUNTER.with_label_values(&[&name, "XREADGROUP"]);
-        let m_xread_nil = metrics::REDIS_COUNTER.with_label_values(&[&name, "XREADGROUP-NIL"]);
-        let m_xread_err = metrics::REDIS_COUNTER.with_label_values(&[&name, "XREADGROUP-ERR"]);
-        let m_xack = metrics::REDIS_COUNTER.with_label_values(&[&name, "XACK"]);
         let queue = name.clone();
         let group = match cfg.group {
             RedisStreamGroupConfig::Name(ref name) => name.to_string(),
@@ -237,16 +255,7 @@ impl RedisStreamR {
         Self {
             order_id: Default::default(),
             connection,
-            cfg,
-            name,
-            group,
-            fail: Default::default(),
-            m_sleep,
-            m_xadd,
-            m_xread,
-            m_xread_nil,
-            m_xread_err,
-            m_xack,
+            inner: Arc::new(RedisStreamInner::new(cfg, name, group)),
         }
     }
 
@@ -323,18 +332,18 @@ impl RedisStreamR {
 
     #[tracing::instrument(
         name = "stream.insert",
-        fields(msg_id = &msg.meta.id, stream = &self.name),
+        fields(msg_id = &msg.meta.id, stream = &self.inner.name),
         skip_all,
         level = "trace",
     )]
     async fn insert(&mut self, msg: Arc<server::Envelop>) -> Result<String, redis::RedisError> {
-        let mut cmd = redis::cmd("XADD").arg(&self.name).to_owned();
-        if self.cfg.nomkstream {
+        let mut cmd = redis::cmd("XADD").arg(&self.inner.name).to_owned();
+        if self.inner.cfg.nomkstream {
             cmd.arg(b"NOMKSTREAM");
         }
-        if let Some(maxlen) = self.cfg.maxlen {
+        if let Some(maxlen) = self.inner.cfg.maxlen {
             cmd.arg(b"MAXLEN").arg(b"~").arg(maxlen);
-            if let Some(limit) = self.cfg.limit {
+            if let Some(limit) = self.inner.cfg.limit {
                 cmd.arg(b"LIMIT").arg(limit);
             }
         }
@@ -347,16 +356,21 @@ impl RedisStreamR {
             cmd.arg(b"key").arg(&msg.message.key);
         }
         if let Some(ref data) = msg.message.data {
-            cmd.arg(&self.cfg.body_fieldname).arg(&data.value);
+            cmd.arg(&self.inner.cfg.body_fieldname).arg(&data.value);
             cmd.arg(b"content-type").arg(&data.type_url);
         }
-        self.m_xadd.inc();
+        self.inner.m_xadd.inc();
         let msg_id = self.execute::<String>(cmd).await?;
         self.set_order_str(&msg_id);
         Ok(msg_id)
     }
 
-    #[tracing::instrument(name = "stream.fetch", fields(msg_id, stream = &self.name), skip_all, level = "trace")]
+    #[tracing::instrument(
+        name = "stream.fetch",
+        fields(msg_id, stream = &self.inner.name),
+        skip_all,
+        level = "trace",
+    )]
     async fn fetch(
         &mut self,
         noack: bool,
@@ -364,7 +378,7 @@ impl RedisStreamR {
     ) -> Result<Envelop, redis::RedisError> {
         let mut cmd = redis::cmd("XREADGROUP")
             .arg(b"GROUP")
-            .arg(&self.group)
+            .arg(&self.inner.group)
             .arg(consumer_id.to_string())
             .arg(b"COUNT")
             .arg(b"1")
@@ -372,15 +386,15 @@ impl RedisStreamR {
         if noack {
             cmd.arg(b"NOACK");
         }
-        cmd.arg(b"STREAMS").arg(&self.name).arg(b">");
-        self.m_xread.inc();
+        cmd.arg(b"STREAMS").arg(&self.inner.name).arg(b">");
+        self.inner.m_xread.inc();
         let span = tracing::trace_span!("redis::XREADGROUP");
         match self
             .connection
             .req_packed_command(&cmd)
             .instrument(span)
             .await
-            .inspect_err(|_| self.m_xread_err.inc())?
+            .inspect_err(|_| self.inner.m_xread_err.inc())?
         {
             redis::Value::Bulk(mut b) => {
                 let mut msg_id = String::default();
@@ -402,7 +416,7 @@ impl RedisStreamR {
                                 if let Some(ct) = headers.remove("content-type") {
                                     data.type_url = String::from_utf8_lossy(&ct).to_string();
                                 }
-                                if let Some(body) = headers.remove(&self.cfg.body_fieldname) {
+                                if let Some(body) = headers.remove(&self.inner.cfg.body_fieldname) {
                                     data.value = body;
                                 }
                                 msg.data = Some(data);
@@ -410,7 +424,7 @@ impl RedisStreamR {
                                     msg.headers
                                         .insert(k, String::from_utf8_lossy(&v).to_string());
                                 }
-                                self.fail.store(0, Ordering::Relaxed);
+                                self.inner.fail.store(0, Ordering::Relaxed);
                             }
                             if let Some(redis::Value::Data(id)) = b.pop() {
                                 msg_id = String::from_utf8_lossy(&id).to_string();
@@ -427,21 +441,21 @@ impl RedisStreamR {
                 envelop.span = tracing::trace_span!(parent: None, "message");
                 envelop.span.set_parent(parent_cx);
                 envelop.meta.id = msg_id;
-                envelop.meta.shard.clone_from(&self.name);
-                envelop.meta.queue.clone_from(&self.cfg.name);
+                envelop.meta.shard.clone_from(&self.inner.name);
+                envelop.meta.queue.clone_from(&self.inner.cfg.name);
                 Ok(envelop)
             }
             redis::Value::Nil => {
-                self.m_xread_nil.inc();
-                self.fail.fetch_add(1, Ordering::Relaxed);
+                self.inner.m_xread_nil.inc();
+                self.inner.fail.fetch_add(1, Ordering::Relaxed);
                 Err(redis::RedisError::from((
                     redis::ErrorKind::TypeError,
                     "Empty",
                 )))
             }
             other => {
-                self.m_xread_err.inc();
-                self.fail.fetch_add(10, Ordering::Relaxed);
+                self.inner.m_xread_err.inc();
+                self.inner.fail.fetch_add(10, Ordering::Relaxed);
                 Err(redis::RedisError::from((
                     redis::ErrorKind::ParseError,
                     "Unexpected value",
@@ -453,17 +467,17 @@ impl RedisStreamR {
 
     #[tracing::instrument(
         name = "stream.ack",
-        fields(msg_id = id, stream = &self.name),
+        fields(msg_id = id, stream = &self.inner.name),
         skip_all,
         level = "trace",
     )]
     async fn ack(&mut self, stream: String, id: String) -> Result<bool, redis::RedisError> {
         let cmd = redis::cmd("XACK")
             .arg(&stream)
-            .arg(&self.group)
+            .arg(&self.inner.group)
             .arg(&id)
             .to_owned();
-        self.m_xack.inc();
+        self.inner.m_xack.inc();
         self.execute(cmd).await
     }
 }
@@ -473,8 +487,7 @@ struct SubscriberRedisStream {
     name: String,
     consumer: GenericConsumer,
     consumer_id: String,
-    delay: tokio_util::time::DelayQueue<RedisStreamR>,
-    fetchers: BinaryHeap<RedisStreamR>,
+    streams: Vec<RedisStreamR>,
     m_sent: GenericCounter<AtomicF64>,
     m_consumers: GenericGauge<AtomicF64>,
     tx_fetch: mpsc::Sender<FetchCommand>,
@@ -489,19 +502,14 @@ impl Drop for SubscriberRedisStream {
 
 impl SubscriberRedisStream {
     fn new(q: &RedisStreamQueue, consumer: GenericConsumer) -> Self {
-        let mut fetchers = BinaryHeap::new();
-        let delay = tokio_util::time::DelayQueue::new();
+        let streams = q.streams.clone();
         let name = q.name.clone();
-        for stream in q.streams.iter() {
-            fetchers.push(stream.clone());
-        }
         q.m_consumers.inc();
         Self {
             name,
             consumer,
+            streams,
             consumer_id: q.consumer_id.clone(),
-            delay,
-            fetchers,
             m_sent: q.m_sent.clone(),
             m_consumers: q.m_consumers.clone(),
             tx_fetch: q.tx_fetch.clone(),
@@ -514,54 +522,31 @@ impl SubscriberRedisStream {
         noack: bool,
         root_span: tracing::Span,
     ) -> Result<(), GenericError> {
-        if self.consumer.is_dead() {
-            self.consumer.send_timeout(self.name.clone()).await?;
-            return Ok(());
-        }
-        for _ in 0..self.read_limit {
-            let stream = if let s @ Some(_) = self.fetchers.pop() {
-                s
-            } else {
-                self.delay
-                    .next()
-                    .instrument(tracing::trace_span!("subscriber.wait_stream"))
-                    .await
-                    .map(|s| s.into_inner())
-            };
-            if let Some(mut stream) = stream {
-                let result = stream.fetch(noack, self.consumer_id.clone()).await;
-                match result {
-                    Ok(msg) => {
-                        let cx = msg.span.context();
-                        root_span.set_parent(cx.clone());
-                        self.fetchers.push(stream);
-                        self.consumer
-                            .send_message(Arc::new(msg))
-                            .with_context(cx)
-                            .await?;
-                        self.m_sent.inc();
-                        return Ok(());
-                    }
-                    Err(_) => {
-                        stream.up();
-                        if self.consumer.is_dead() {
-                            self.consumer.send_timeout(self.name.clone()).await?;
-                            return Ok(());
-                        }
-                        if stream.fail.load(Ordering::Relaxed) < 20 {
-                            self.fetchers.push(stream);
-                        } else {
-                            let timeout = if stream.fail.load(Ordering::Relaxed) < 50 {
-                                Duration::from_millis(10)
-                            } else {
-                                Duration::from_millis(20)
-                            };
-                            stream.m_sleep.inc();
-                            self.delay.insert(stream, timeout);
-                        }
-                    }
-                }
+        let mut read_limit = self.read_limit;
+        self.streams.sort();
+        for stream in self.streams.iter_mut() {
+            if self.consumer.is_dead() {
+                self.consumer.send_timeout(self.name.clone()).await?;
+                return Ok(());
             }
+            if read_limit == 0 {
+                break;
+            }
+            let result = stream.fetch(noack, self.consumer_id.clone()).await;
+            match result {
+                Ok(msg) => {
+                    let cx = msg.span.context();
+                    root_span.set_parent(cx.clone());
+                    self.consumer
+                        .send_message(Arc::new(msg))
+                        .with_context(cx)
+                        .await?;
+                    self.m_sent.inc();
+                    return Ok(());
+                }
+                Err(_) => stream.up(),
+            }
+            read_limit -= 1;
         }
         let consumer = self.consumer.generic_clone();
         Ok(self.tx_fetch.send(FetchCommand::Fetch(consumer)).await?)
@@ -590,7 +575,7 @@ impl Subscriber {
         tracing::debug!("New subscriber");
         let mut streams = HashMap::new();
         for stream in q.streams.iter() {
-            streams.insert(stream.name.clone(), stream.clone());
+            streams.insert(stream.inner.name.clone(), stream.clone());
         }
         let (tx, rx) = mpsc::channel(99);
         let name = q.name.clone();
@@ -761,7 +746,7 @@ impl RedisStreamQueue {
         ));
 
         let (tx_fetch, rx_fetch) = mpsc::channel(99);
-        let read_limit = cfg.read_limit.unwrap_or(streams.len() / 2);
+        let read_limit = cfg.read_limit.unwrap_or(streams.len());
         let name = cfg.name.clone();
         let m_consumers = metrics::QUEUE_GAUGE.with_label_values(&[&name, "consumers"]);
         let m_sent = metrics::QUEUE_COUNTER.with_label_values(&[&name, "sent"]);
@@ -817,7 +802,8 @@ impl RedisStreamQueue {
                 Some(res) = tasks.join_next() => {
                     match res {
                         Ok(PublishResult::GracefulShutdown) => {
-                            if task_tracker.is_closed() {
+                            if task_tracker.is_closed() && rx.is_empty() {
+                                rx.close();
                                 break;
                             }
                         }
@@ -902,7 +888,8 @@ impl RedisStreamQueue {
                     m_sent.inc();
                 }
                 FetchCommand::GracefulShutdown => {
-                    if task_tracker.is_closed() && tasks.is_empty() && waiters.is_empty() {
+                    if task_tracker.is_closed() && tasks.is_empty() {
+                        rx.close();
                         break;
                     }
                 }
@@ -944,5 +931,54 @@ impl RedisStreamQueue {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RedisStream, RedisStreamInner};
+    use crate::config::{RedisStreamConfig, RedisStreamGroupConfig};
+    use std::sync::Arc;
+
+    impl Default for RedisStreamConfig {
+        fn default() -> Self {
+            Self {
+                name: Default::default(),
+                connector: Default::default(),
+                topics: Default::default(),
+                maxlen: Default::default(),
+                limit: Default::default(),
+                group: RedisStreamGroupConfig::Name(Default::default()),
+                nomkstream: Default::default(),
+                streams: Default::default(),
+                body_fieldname: RedisStreamConfig::default_body_fieldname(),
+                read_limit: Default::default(),
+            }
+        }
+    }
+
+    impl RedisStream<String, String> {
+        fn new_test(order_id: &str) -> Self {
+            Self {
+                order_id: order_id.to_string(),
+                connection: String::default(),
+                inner: Arc::new(RedisStreamInner::new(
+                    RedisStreamConfig::default(),
+                    String::default(),
+                    String::default(),
+                )),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_order() {
+        let mut streams = vec![];
+        streams.push(RedisStream::new_test("2"));
+        streams.push(RedisStream::new_test("1"));
+        streams.sort();
+
+        let orders: Vec<_> = streams.iter().map(|x| x.order_id.as_str()).collect();
+        assert_eq!(orders, vec!["1", "2"]);
     }
 }
