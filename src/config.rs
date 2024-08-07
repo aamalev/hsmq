@@ -254,11 +254,16 @@ pub struct RedisStreamConfig {
     pub streams: Vec<Stream>,
     #[serde(default = "RedisStreamConfig::default_body_fieldname")]
     pub body_fieldname: String,
+    #[serde(default = "RedisStreamConfig::default_body_type_fieldname")]
+    pub body_type_fieldname: String,
     #[serde(default)]
     pub read_limit: Option<usize>,
 }
 
 impl RedisStreamConfig {
+    pub fn default_body_type_fieldname() -> String {
+        "type".to_string()
+    }
     pub fn default_body_fieldname() -> String {
         "body".to_string()
     }
