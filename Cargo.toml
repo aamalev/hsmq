@@ -26,6 +26,7 @@ prometheus = { version = "0.13.3", features = ["process"] }
 prost = "0.13.1"
 prost-types = "0.13.1"
 rand = "0.8.5"
+redis = { version = "0.25.3", optional = true }
 serde = { version = "1.0.197", features = ["derive"] }
 tokio = { version = "1.37.0", features = ["macros", "rt-multi-thread", "signal"] }
 tokio-stream = "0.1.15"
@@ -47,3 +48,7 @@ tonic-build = "0.12.1"
 console = ["dep:console-subscriber"]
 sentry = ["sentry/tokio", "dep:sentry-tracing"]
 consul = ["dep:consulrs"]
+default = ["redis", "redis-cluster"]
+redis = ["redis/tokio-comp"]
+redis-cluster = ["redis/cluster-async"]
+redis-stream-order-atomic = []
