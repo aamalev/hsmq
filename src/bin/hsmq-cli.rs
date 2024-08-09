@@ -64,7 +64,7 @@ lazy_static! {
 #[derive(Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 struct Claims {
     sub: String,
-    exp: usize,
+    exp: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +81,33 @@ impl ClientFactory {
             grpc_uri,
             username,
         }
+    }
+
+    fn gen_jwt<T>(&self, claims: T) -> Option<String>
+    where
+        T: Serialize,
+    {
+        let mut result = None;
+        for secret in self
+            .config
+            .auth
+            .jwt
+            .clone()
+            .expect("Not found jwt secrets")
+            .secrets
+            .iter()
+        {
+            if let Some(secret) = secret.resolve() {
+                result = encode(
+                    &Header::default(),
+                    &claims,
+                    &EncodingKey::from_secret(secret.as_ref()),
+                )
+                .ok();
+                break;
+            }
+        }
+        result
     }
 
     async fn create_client(
@@ -103,38 +130,23 @@ impl ClientFactory {
             self.config.users.clone()
         };
 
-        let mut token = None;
-        for user in users.values() {
-            for t in user.tokens.iter() {
-                if let Some(t) = t.resolve() {
-                    token = Some(t);
-                };
+        let claims = Claims {
+            sub: self.username.clone(),
+            exp: Some((utils::current_time() + Duration::from_secs(3600)).as_secs() as usize),
+        };
+        let token = if let Some(token) = self.gen_jwt(claims) {
+            Some(token)
+        } else {
+            let mut token = None;
+            for user in users.values() {
+                for t in user.tokens.iter() {
+                    if let Some(t) = t.resolve() {
+                        token = Some(t);
+                    };
+                }
             }
-        }
-        for secret in self
-            .config
-            .auth
-            .jwt
-            .clone()
-            .unwrap_or_default()
-            .secrets
-            .iter()
-        {
-            if let Some(secret) = secret.resolve() {
-                let claims = Claims {
-                    sub: self.username.clone(),
-                    exp: (utils::current_time() + Duration::from_secs(3600)).as_secs() as usize,
-                };
-
-                token = encode(
-                    &Header::default(),
-                    &claims,
-                    &EncodingKey::from_secret(secret.as_ref()),
-                )
-                .ok();
-                break;
-            }
-        }
+            token
+        };
         let header: MetadataValue<_> = if let Some(token) = token {
             format!("Bearer {}", token)
         } else {
@@ -170,7 +182,7 @@ struct Cli {
 }
 
 impl Cli {
-    async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn run(mut self) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = if let Some(config_path) = self.config.as_deref() {
             Config::from_file(config_path)?
         } else {
@@ -191,6 +203,11 @@ impl Cli {
             .username
             .clone()
             .unwrap_or_else(|| std::env::var("USER").unwrap_or_default());
+        self.username = if username.is_empty() {
+            None
+        } else {
+            Some(username.clone())
+        };
 
         if let Some(ref p) = cfg.prometheus {
             if let Some(ref addr) = p.http_address {
@@ -201,7 +218,7 @@ impl Cli {
         }
 
         let factory = ClientFactory::new(cfg.clone(), grpc_addr, username);
-        self.command.run(factory, cfg).await?;
+        self.command.run(factory, cfg, &self).await?;
 
         Ok(())
     }
@@ -236,6 +253,12 @@ impl Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Generate JWT
+    Jwt {
+        /// Username
+        #[arg(short, long)]
+        username: Option<String>,
+    },
     /// Publish message
     Publish {
         /// Count
@@ -271,8 +294,16 @@ impl Command {
         &self,
         client_factory: ClientFactory,
         cfg: Config,
+        cli: &Cli,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match self {
+            Command::Jwt { username } => self.jwt(
+                client_factory,
+                username
+                    .clone()
+                    .or(cli.username.clone())
+                    .expect("need username"),
+            )?,
             Command::Publish { topic, data, count } => {
                 self.publish(client_factory, topic.clone(), data.clone(), *count)
                     .await?
@@ -283,6 +314,21 @@ impl Command {
             Command::Streaming { command } => command.run(client_factory).await?,
             Command::Cluster { command } => command.run(client_factory, cfg).await?,
         }
+        Ok(())
+    }
+
+    fn jwt(
+        &self,
+        client_factory: ClientFactory,
+        username: String,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let claims = Claims {
+            sub: username,
+            exp: None,
+        };
+        println!("{claims:?}");
+        let token = client_factory.gen_jwt(claims).expect("Not found secret");
+        println!("Token {token}");
         Ok(())
     }
 
