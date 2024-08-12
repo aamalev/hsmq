@@ -115,6 +115,7 @@ message Response {
         FetchMessageError fetch_message_error = 5;
         PubError pub_error = 6;
         Pong pong = 7;
+        MessageAck message_ack = 8;
     }
 }
 
