@@ -271,6 +271,7 @@ impl RedisStreamConfig {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct Config {
+    #[serde(default)]
     pub node: Node,
     pub tracing: Option<Tracing>,
     pub prometheus: Option<Prometheus>,
