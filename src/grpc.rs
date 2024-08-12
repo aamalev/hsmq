@@ -584,13 +584,27 @@ impl GrpcStreaming {
                     }
                 }
             }
-            pb::request::Kind::MessageAck(pb::MessageAck {
-                meta: Some(pb::MessageMeta { id, queue, shard }),
-            }) => {
-                if let Some(subscriber) = self.subs.get_mut(&queue) {
-                    if let Err(e) = subscriber.ack(id, shard).await {
-                        log::error!("Unexpected queue error {:?}", e);
+            pb::request::Kind::MessageAck(
+                ref ack @ pb::MessageAck {
+                    meta:
+                        Some(pb::MessageMeta {
+                            ref id,
+                            ref queue,
+                            ref shard,
+                        }),
+                },
+            ) => {
+                if let Some(subscriber) = self.subs.get_mut(queue) {
+                    if let Err(e) = subscriber.ack(id.clone(), shard.clone()).await {
+                        tracing::error!(error = e, "Unexpected queue error");
                     };
+                }
+                let kind = Some(pb::response::Kind::MessageAck(ack.clone()));
+                if let Err(e) = self.out_tx.send(Ok(pb::Response { kind })).await {
+                    tracing::debug!(
+                        error = &e as &dyn std::error::Error,
+                        "Error send MessageAck",
+                    );
                 }
             }
             pb::request::Kind::MessageRequeue(_) => todo!(),
