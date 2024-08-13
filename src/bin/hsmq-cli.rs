@@ -70,17 +70,11 @@ struct Claims {
 #[derive(Clone, Debug)]
 struct ClientFactory {
     config: Config,
-    grpc_uri: String,
-    username: String,
 }
 
 impl ClientFactory {
-    fn new(config: Config, grpc_uri: String, username: String) -> Self {
-        Self {
-            config,
-            grpc_uri,
-            username,
-        }
+    fn new(config: Config) -> Self {
+        Self { config }
     }
 
     fn gen_jwt<T>(&self, claims: T) -> Option<String>
@@ -118,20 +112,20 @@ impl ClientFactory {
         >,
         Box<dyn std::error::Error>,
     > {
-        let channel = Channel::from_shared(self.grpc_uri.to_string())?
-            .connect()
-            .await?;
+        let grpc_uri = self.config.client.grpc_uri.clone().unwrap();
+        let channel = Channel::from_shared(grpc_uri)?.connect().await?;
 
-        let users = if let Some(user) = self.config.users.get(&self.username) {
+        let username = self.config.client.username.as_ref().unwrap();
+        let users = if let Some(user) = self.config.users.get(username) {
             let mut result = HashMap::new();
-            result.insert(self.username.clone(), user.clone());
+            result.insert(username.clone(), user.clone());
             result
         } else {
             self.config.users.clone()
         };
 
         let claims = Claims {
-            sub: self.username.clone(),
+            sub: username.clone(),
             exp: Some((utils::current_time() + Duration::from_secs(3600)).as_secs() as usize),
         };
         let token = if let Some(token) = self.gen_jwt(claims) {
@@ -150,7 +144,7 @@ impl ClientFactory {
         let header: MetadataValue<_> = if let Some(token) = token {
             format!("Bearer {}", token)
         } else {
-            let up = format!("{}:", &self.username);
+            let up = format!("{}:", username);
             format!("Basic {}", STANDARD.encode(up))
         }
         .parse()?;
@@ -182,42 +176,49 @@ struct Cli {
 }
 
 impl Cli {
-    async fn run(mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let cfg = if let Some(config_path) = self.config.as_deref() {
+    async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut cfg = if let Some(config_path) = self.config.as_deref() {
             Config::from_file(config_path)?
         } else {
             Config::default()
         };
         hsmq::tracing::init_subscriber(&cfg)?;
 
-        let mut grpc_addr = if let Some(ref grpc_uri) = self.grpc_uri {
-            grpc_uri.to_string()
-        } else {
-            cfg.node.grpc_address.map(|v| v.to_string()).unwrap()
-        };
-        if !grpc_addr.starts_with("http") {
-            grpc_addr = format!("http://{}", grpc_addr);
-        };
+        cfg.client.grpc_uri = self
+            .grpc_uri
+            .clone()
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .or(cfg.client.grpc_uri)
+            .filter(|s| !s.is_empty())
+            .or(cfg.node.grpc_address.map(|sa| sa.to_string()))
+            .map(|s| {
+                if !s.starts_with("http") {
+                    format!("http://{}", s)
+                } else {
+                    s
+                }
+            });
 
-        let username = self
+        cfg.client.username = self
             .username
             .clone()
-            .unwrap_or_else(|| std::env::var("USER").unwrap_or_default());
-        self.username = if username.is_empty() {
-            None
-        } else {
-            Some(username.clone())
-        };
+            .filter(|s| !s.is_empty())
+            .or(cfg.client.username)
+            .filter(|s| !s.is_empty())
+            .or(std::env::var("USER").ok())
+            .filter(|s| !s.is_empty());
 
         if let Some(ref p) = cfg.prometheus {
-            if let Some(ref addr) = p.http_address {
-                let mut addr = *addr;
-                addr.set_port(8081);
-                tokio::spawn(Self::prometheus(addr, p.url.to_string()));
+            if let Some(port) = cfg.client.http_port {
+                tokio::spawn(Self::prometheus(
+                    format!("0.0.0.0:{}", port).parse().unwrap(),
+                    p.url.to_string(),
+                ));
             }
         }
 
-        let factory = ClientFactory::new(cfg.clone(), grpc_addr, username);
+        let factory = ClientFactory::new(cfg.clone());
         self.command.run(factory, cfg, &self).await?;
 
         Ok(())
