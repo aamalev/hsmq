@@ -4,6 +4,7 @@ pub mod pb {
 pub mod auth;
 pub mod cluster;
 pub mod config;
+pub mod deque;
 pub mod errors;
 pub mod grpc;
 pub mod jwt;

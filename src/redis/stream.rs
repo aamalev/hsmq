@@ -22,6 +22,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::{
     config::{RedisStreamConfig, RedisStreamGroupCleanConfig, RedisStreamGroupConfig, Stream},
+    deque::Deque,
     errors::{GenericError, PublishMessageError},
     metrics, pb,
     server::{self, Envelop, GenericConsumer, GenericQueue, GenericSubscriber, QueueCommand},
@@ -501,6 +502,7 @@ struct SubscriberRedisStream {
     m_consumers: GenericGauge<AtomicF64>,
     tx_fetch: mpsc::Sender<FetchCommand>,
     read_limit: usize,
+    messages: Arc<Deque<Arc<Envelop>>>,
 }
 
 impl Drop for SubscriberRedisStream {
@@ -523,6 +525,7 @@ impl SubscriberRedisStream {
             m_consumers: q.m_consumers.clone(),
             tx_fetch: q.tx_fetch.clone(),
             read_limit: q.read_limit,
+            messages: q.messages.clone(),
         }
     }
 
@@ -531,6 +534,7 @@ impl SubscriberRedisStream {
         noack: bool,
         root_span: tracing::Span,
     ) -> Result<(), GenericError> {
+        let mut message = None;
         let mut read_limit = self.read_limit;
         self.streams.sort();
         for stream in self.streams.iter_mut() {
@@ -538,27 +542,51 @@ impl SubscriberRedisStream {
                 self.consumer.send_timeout(self.name.clone()).await?;
                 return Ok(());
             }
+            if self.messages.len() > 0 {
+                if let Some(msg) = self.messages.pop_front().await {
+                    tracing::info!(
+                        count = self.messages.len(),
+                        queue = self.name,
+                        consumer.id = self.consumer_id,
+                        "Subscriber extract message from buffer"
+                    );
+                    message = Some(msg);
+                    break;
+                }
+            }
             if read_limit == 0 {
                 break;
             }
             let result = stream.fetch(noack, self.consumer_id.clone()).await;
             match result {
                 Ok(msg) => {
-                    let cx = msg.span.context();
-                    root_span.set_parent(cx.clone());
-                    self.consumer
-                        .send_message(Arc::new(msg))
-                        .with_context(cx)
-                        .await?;
-                    self.m_sent.inc();
-                    return Ok(());
+                    message = Some(Arc::new(msg));
+                    break;
                 }
                 Err(_) => stream.up(),
             }
             read_limit -= 1;
         }
-        let consumer = self.consumer.generic_clone();
-        Ok(self.tx_fetch.send(FetchCommand::Fetch(consumer)).await?)
+        if let Some(msg) = message {
+            let cx = msg.span.context();
+            root_span.set_parent(cx.clone());
+            let sent_result = self
+                .consumer
+                .send_message(msg.clone())
+                .with_context(cx)
+                .await;
+            if let Err(e) = sent_result {
+                self.messages.push_back(msg).await;
+                Err(e)?
+            } else {
+                self.m_sent.inc();
+                Ok(())
+            }
+        } else {
+            let consumer = self.consumer.generic_clone();
+            self.tx_fetch.send(FetchCommand::Fetch(consumer)).await?;
+            Ok(())
+        }
     }
 }
 
@@ -693,6 +721,7 @@ pub struct RedisStreamQueue {
     pub name: String,
     tx_pub: mpsc::Sender<Arc<Envelop>>,
     tx_fetch: mpsc::Sender<FetchCommand>,
+    messages: Arc<Deque<Arc<Envelop>>>,
     streams: Vec<RedisStreamR>,
     consumer_id: String,
     m_sent: GenericCounter<AtomicF64>,
@@ -747,11 +776,13 @@ impl RedisStreamQueue {
         let (tx_pub, rx) = mpsc::channel(99);
         let name = cfg.name.clone();
         let m_received = metrics::QUEUE_COUNTER.with_label_values(&[&name, "received"]);
+        let m_in_buffer = metrics::QUEUE_GAUGE.with_label_values(&[&name, "in-buffer"]);
         task_tracker.spawn(Self::publishing(
             rx,
             task_tracker.clone(),
             streams.iter().cloned().collect(),
             m_received,
+            m_in_buffer,
         ));
 
         let (tx_fetch, rx_fetch) = mpsc::channel(99);
@@ -759,6 +790,8 @@ impl RedisStreamQueue {
         let name = cfg.name.clone();
         let m_consumers = metrics::QUEUE_GAUGE.with_label_values(&[&name, "consumers"]);
         let m_sent = metrics::QUEUE_COUNTER.with_label_values(&[&name, "sent"]);
+        let m_out_buffer = metrics::QUEUE_GAUGE.with_label_values(&[&name, "out-buffer"]);
+        let messages = Arc::new(Deque::new(m_out_buffer));
         let hostname = gethostname::gethostname().to_string_lossy().to_string();
         tokio::spawn(Self::fetching(
             name.clone(),
@@ -767,12 +800,14 @@ impl RedisStreamQueue {
             task_tracker,
             m_sent.clone(),
             hostname.clone(),
+            messages.clone(),
         ));
         Self {
             name,
             tx_pub,
             tx_fetch,
             streams,
+            messages,
             consumer_id: hostname,
             m_sent,
             m_consumers,
@@ -793,6 +828,7 @@ impl RedisStreamQueue {
         task_tracker: TaskTracker,
         mut writers: VecDeque<RedisStreamR>,
         m_received: GenericCounter<AtomicF64>,
+        m_in_buffer: GenericGauge<AtomicF64>,
     ) {
         let mut tasks = JoinSet::new();
         let mut messages = VecDeque::new();
@@ -807,6 +843,7 @@ impl RedisStreamQueue {
                 Some(msg) = rx.recv() => {
                     tracing::debug!("Received {} msg {:?}", messages.len(), &msg);
                     messages.push_back(msg);
+                    m_in_buffer.inc();
                 }
                 Some(res) = tasks.join_next() => {
                     match res {
@@ -827,6 +864,7 @@ impl RedisStreamQueue {
             }
             while !messages.is_empty() && !writers.is_empty() {
                 if let Some(msg) = messages.pop_front() {
+                    m_in_buffer.dec();
                     if let Some(mut stream) = writers.pop_front() {
                         tracing::debug!("Process msg, writers {}", writers.len());
                         let m_received = m_received.clone();
@@ -855,6 +893,7 @@ impl RedisStreamQueue {
         task_tracker: TaskTracker,
         m_sent: GenericCounter<AtomicF64>,
         queue_consumer_id: String,
+        messages: Arc<Deque<Arc<Envelop>>>,
     ) {
         let mut delay = DelayQueue::new();
         let mut tasks = JoinSet::new();
@@ -882,9 +921,16 @@ impl RedisStreamQueue {
                 }
                 FetchCommand::ValueStreamConsumer(envelop, stream, consumer) => {
                     readers.push(stream);
+                    let messages = messages.clone();
                     tasks.spawn(async move {
                         let msg = Arc::new(envelop);
-                        let _ = consumer.send_message(msg).await;
+                        if let Err(e) = consumer.send_message(msg.clone()).await {
+                            tracing::warn!(
+                                error = &e as &dyn std::error::Error,
+                                "Error send message to consumer from stream"
+                            );
+                            messages.push_back(msg).await;
+                        }
                         FetchCommand::Consumer(consumer)
                     });
                 }
@@ -907,6 +953,29 @@ impl RedisStreamQueue {
             while let Some(consumer) = waiters.pop_front() {
                 if consumer.is_dead() {
                     let _ = consumer.send_timeout(name.clone()).await;
+                    continue;
+                }
+
+                if messages.len() > 0 {
+                    let messages = messages.clone();
+                    tasks.spawn(async move {
+                        if let Some(msg) = messages.pop_front().await {
+                            tracing::info!(
+                                count = messages.len(),
+                                "Fetching extract message from buffer"
+                            );
+                            if let Err(e) = consumer.send_message(msg.clone()).await {
+                                tracing::warn!(
+                                    error = &e as &dyn std::error::Error,
+                                    "Error send message to consumer from buffer"
+                                );
+                                messages.push_back(msg).await;
+                            }
+                            FetchCommand::Consumer(consumer)
+                        } else {
+                            FetchCommand::Fetch(consumer)
+                        }
+                    });
                     continue;
                 }
 
