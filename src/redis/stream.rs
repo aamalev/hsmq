@@ -608,13 +608,14 @@ impl Drop for Subscriber {
 }
 
 impl Subscriber {
-    fn new(q: &RedisStreamQueue, consumer: GenericConsumer) -> Self {
+    fn new(q: &RedisStreamQueue, consumer: GenericConsumer, task_tracker: TaskTracker) -> Self {
         tracing::debug!("New subscriber");
+        let consumer_id = consumer.get_id();
         let mut streams = HashMap::new();
         for stream in q.streams.iter() {
             streams.insert(stream.inner.name.clone(), stream.clone());
         }
-        let (tx, rx) = mpsc::channel(99);
+        let (tx_fetch, rx) = mpsc::channel(99);
         let name = q.name.clone();
         let prefetch_count = consumer.get_prefetch_count();
         let inner = SubscriberRedisStream::new(q, consumer);
@@ -625,15 +626,19 @@ impl Subscriber {
             }
         });
         let (tx_ack, rx_ack) = mpsc::channel(99);
-        let task_ack = tokio::spawn(async {
-            if let Err(e) = Self::ack(streams, rx_ack).await {
-                tracing::error!(error = e, "Subscriber ack disabled");
+        let task_ack = tokio::spawn(async move {
+            if let Err(e) = Self::ack(streams, rx_ack, task_tracker).await {
+                tracing::error!(
+                    error = e,
+                    consumer.id = consumer_id.to_string(),
+                    "Subscriber ack disabled",
+                );
             }
         });
         Self {
             name,
             prefetch_count,
-            tx_fetch: tx,
+            tx_fetch,
             task_fetch,
             tx_ack,
             task_ack,
@@ -660,13 +665,50 @@ impl Subscriber {
         Ok(())
     }
     async fn ack(
-        mut streams: HashMap<String, RedisStreamR>,
+        streams: HashMap<String, RedisStreamR>,
         mut rx: mpsc::Receiver<(String, String)>,
+        task_tracker: TaskTracker,
     ) -> Result<(), GenericError> {
-        while let Some((shard, id)) = rx.recv().await {
-            if let Some(s) = streams.get_mut(&shard) {
-                if let Err(e) = s.ack(shard, id).await {
-                    tracing::error!(error = &e as &dyn std::error::Error, "Error ack");
+        let mut tasks = JoinSet::new();
+        loop {
+            if tasks.is_empty() {
+                tasks.spawn(async {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    true // check shutdown
+                });
+            }
+            let item = tokio::select! {
+                Some((shard, id)) = rx.recv() => {
+                    tracing::debug!(
+                        message.id = &id,
+                        message.stream = &shard,
+                        "Received ack",
+                    );
+                    Some((shard, id))
+                }
+                Some(res) = tasks.join_next() => {
+                    match res {
+                        Ok(true) => {
+                            if task_tracker.is_closed() && rx.is_empty() {
+                                rx.close();
+                                break;
+                            }
+                        }
+                        Ok(false) => (),
+                        Err(e) => tracing::error!("Error in task queue {}", e),
+                    };
+                    None
+                }
+            };
+            if let Some((shard, id)) = item {
+                if let Some(stream) = streams.get(&shard) {
+                    let mut stream = stream.clone();
+                    tasks.spawn(async move {
+                        while let Err(e) = stream.ack(shard.clone(), id.clone()).await {
+                            tracing::error!(error = &e as &dyn std::error::Error, "Error ack",);
+                        }
+                        false
+                    });
                 }
             }
         }
@@ -727,6 +769,7 @@ pub struct RedisStreamQueue {
     m_sent: GenericCounter<AtomicF64>,
     m_consumers: GenericGauge<AtomicF64>,
     read_limit: usize,
+    task_tracker: TaskTracker,
 }
 
 #[tonic::async_trait]
@@ -755,7 +798,7 @@ impl server::Queue for RedisStreamQueue {
         &self,
         consumer: GenericConsumer,
     ) -> Result<GenericSubscriber, GenericError> {
-        let subscriber = Subscriber::new(self, consumer);
+        let subscriber = Subscriber::new(self, consumer, self.task_tracker.clone());
         Ok(Box::new(subscriber))
     }
 }
@@ -797,7 +840,7 @@ impl RedisStreamQueue {
             name.clone(),
             rx_fetch,
             streams.iter().cloned().collect(),
-            task_tracker,
+            task_tracker.clone(),
             m_sent.clone(),
             hostname.clone(),
             messages.clone(),
@@ -812,6 +855,7 @@ impl RedisStreamQueue {
             m_sent,
             m_consumers,
             read_limit,
+            task_tracker,
         }
     }
 
