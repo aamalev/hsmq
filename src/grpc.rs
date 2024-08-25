@@ -9,6 +9,7 @@ use crate::server::{
     self, Consumer, ConsumerSendResult, Envelop, GenericConsumer, HsmqServer, QueueCommand,
     Subscription,
 };
+
 use prometheus::core::{AtomicF64, GenericCounter, GenericGauge};
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
@@ -16,6 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use std::{error::Error, io::ErrorKind};
+use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
@@ -36,7 +38,7 @@ impl GrpcService {
     pub fn new(addr: SocketAddr, task_tracker: TaskTracker) -> Self {
         Self { addr, task_tracker }
     }
-    pub async fn run(&self, hsmq: HsmqServer, auth: Arc<Auth>) {
+    pub async fn run(&self, hsmq: HsmqServer, auth: Arc<Auth>, listener: Option<TcpListener>) {
         let task_tracker = self.task_tracker.clone();
 
         let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
@@ -47,10 +49,19 @@ impl GrpcService {
         let svc =
             hsmq_server::HsmqServer::with_interceptor(hsmq, move |req| auth.grpc_check_auth(req));
         log::info!("Run grpc on {:?}", &self.addr);
+
+        let incoming = match listener {
+            Some(l) => l,
+            None => TcpListener::bind(self.addr).await.unwrap(),
+        };
+
         if let Err(e) = TonicServer::builder()
             .add_service(health_service)
             .add_service(svc)
-            .serve_with_shutdown(self.addr, async move { task_tracker.wait().await })
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(incoming),
+                async move { task_tracker.wait().await },
+            )
             .await
         {
             self.task_tracker.close();

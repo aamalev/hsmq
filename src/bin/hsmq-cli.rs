@@ -1,10 +1,11 @@
-use base64::{engine::general_purpose::STANDARD, Engine};
+use clap::{command, Parser, Subcommand};
 use http::uri::Uri;
 use lazy_static::lazy_static;
 use opentelemetry::global;
 use prometheus::proto::LabelPair;
 use prometheus::{register_histogram_vec, Encoder, HistogramVec, TextEncoder};
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::{
@@ -13,48 +14,16 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
 use tokio_util::task::task_tracker::TaskTracker;
-use tonic::metadata::MetadataValue;
-use tonic::service::interceptor::InterceptedService;
-use tonic::Status;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-pub mod pb {
-    tonic::include_proto!("hsmq.v1.hsmq");
-}
-
-#[path = "../config.rs"]
-pub mod config;
-use crate::cluster::{JwtPackage, Package};
-use crate::config::Config;
-
-#[path = ".."]
-mod hsmq {
-    pub mod tracing;
-}
-
-#[path = "../utils.rs"]
-pub mod utils;
-
-#[path = "../errors.rs"]
-pub mod errors;
-
-#[path = "../metrics.rs"]
-pub mod metrics;
-
-#[path = "../jwt.rs"]
-pub mod jwt;
-
-#[path = "../cluster.rs"]
-pub mod cluster;
-
-use clap::{command, Parser, Subcommand};
-use jsonwebtoken::{encode, EncodingKey, Header};
-use pb::{hsmq_client::HsmqClient, subscription_response, Message, SubscribeQueueRequest};
-use serde::{Deserialize, Serialize};
-use tokio_stream::StreamExt;
-use tonic::{transport::Channel, Request};
+use client_factory::ClientFactory;
+use cluster::{JwtPackage, Package};
+use config::Config;
+use hsmq::{client_factory, cluster, config, jwt, pb, utils};
+use pb::{subscription_response, Message, SubscribeQueueRequest};
 
 lazy_static! {
     pub static ref LATENCY_HIST: HistogramVec =
@@ -65,95 +34,6 @@ lazy_static! {
 struct Claims {
     sub: String,
     exp: Option<usize>,
-}
-
-#[derive(Clone, Debug)]
-struct ClientFactory {
-    config: Config,
-}
-
-impl ClientFactory {
-    fn new(config: Config) -> Self {
-        Self { config }
-    }
-
-    fn gen_jwt<T>(&self, claims: T) -> Option<String>
-    where
-        T: Serialize,
-    {
-        let mut result = None;
-        for secret in self
-            .config
-            .auth
-            .jwt
-            .clone()
-            .expect("Not found jwt secrets")
-            .secrets
-            .iter()
-        {
-            if let Some(secret) = secret.resolve() {
-                result = encode(
-                    &Header::default(),
-                    &claims,
-                    &EncodingKey::from_secret(secret.as_ref()),
-                )
-                .ok();
-                break;
-            }
-        }
-        result
-    }
-
-    async fn create_client(
-        &self,
-    ) -> Result<
-        HsmqClient<
-            InterceptedService<Channel, impl Fn(Request<()>) -> Result<Request<()>, Status>>,
-        >,
-        Box<dyn std::error::Error>,
-    > {
-        let grpc_uri = self.config.client.grpc_uri.clone().unwrap();
-        let channel = Channel::from_shared(grpc_uri)?.connect().await?;
-
-        let username = self.config.client.username.as_ref().unwrap();
-        let users = if let Some(user) = self.config.users.get(username) {
-            let mut result = HashMap::new();
-            result.insert(username.clone(), user.clone());
-            result
-        } else {
-            self.config.users.clone()
-        };
-
-        let claims = Claims {
-            sub: username.clone(),
-            exp: Some((utils::current_time() + Duration::from_secs(3600)).as_secs() as usize),
-        };
-        let token = if let Some(token) = self.gen_jwt(claims) {
-            Some(token)
-        } else {
-            let mut token = None;
-            for user in users.values() {
-                for t in user.tokens.iter() {
-                    if let Some(t) = t.resolve() {
-                        token = Some(t);
-                    };
-                }
-            }
-            token
-        };
-        let header: MetadataValue<_> = if let Some(token) = token {
-            format!("Bearer {}", token)
-        } else {
-            let up = format!("{}:", username);
-            format!("Basic {}", STANDARD.encode(up))
-        }
-        .parse()?;
-        let client = HsmqClient::with_interceptor(channel, move |mut req: Request<()>| {
-            req.metadata_mut().insert("authorization", header.clone());
-            Ok(req)
-        });
-        Ok(client)
-    }
 }
 
 #[derive(Parser)]
@@ -523,7 +403,7 @@ impl StreaminCommand {
                 .instrument(tracing::trace_span!(parent: &span, "publish"))
                 .await
             {
-                log::error!("Publusher error {e:?}");
+                log::error!("Publisher error {e:?}");
                 break;
             } else if limit.fetch_sub(1, Ordering::Acquire) <= 1 {
                 counter += 1;
@@ -800,8 +680,8 @@ impl ClusterCommand {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let cluster_cfg = cfg.cluster.clone().unwrap_or_default();
         let jwt_cfg = cfg.cluster_jwt();
-        let jwt = crate::jwt::JWT::new(jwt_cfg);
-        let sock = crate::cluster::JwtSocket::bind("0.0.0.0:0", jwt).await?;
+        let jwt = jwt::JWT::new(jwt_cfg);
+        let sock = cluster::JwtSocket::bind("0.0.0.0:0", jwt).await?;
 
         match self {
             ClusterCommand::Join { address } => {
