@@ -55,7 +55,7 @@ impl From<Package> for JwtPackage {
     }
 }
 
-pub(crate) struct JwtSocket {
+pub struct JwtSocket {
     socket: UdpSocket,
     jwt: JWT,
 }
