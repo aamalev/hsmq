@@ -77,7 +77,7 @@ impl Subscription {
         Self { broadcast, subs }
     }
 
-    fn subscribe(&mut self, queue: GenericQueue) {
+    pub(crate) fn subscribe(&mut self, queue: GenericQueue) {
         self.subs.push(queue);
     }
 
@@ -289,7 +289,7 @@ impl InMemoryQueue {
         Self { name, tx }
     }
 
-    fn new_generic(cfg: config::InMemoryQueue, task_tracker: TaskTracker) -> GenericQueue {
+    pub(crate) fn new_generic(cfg: config::InMemoryQueue, task_tracker: TaskTracker) -> GenericQueue {
         Box::new(Self::new(cfg, task_tracker))
     }
 

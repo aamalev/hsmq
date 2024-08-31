@@ -1,0 +1,66 @@
+[client]
+grpc_uri = "http://0.0.0.0:4847"
+http_port = 8082
+username = "my_username"
+
+[node]
+# grpc_address = "[::1]:4848"  # IPv6
+grpc_address = "0.0.0.0:4847"  # IPv4
+
+[auth.jwt]
+secrets = [
+    "aaa",
+]
+
+[tracing]
+level = "INFO"
+
+# [sentry]
+# dsn = ""
+# env = "development"
+# sample_rate = 1.0
+# traces_sample_rate = 1.0
+# max_breadcrumbs = 5
+
+[cluster]
+name = "c1"
+udp_port = 4847
+
+[prometheus]
+url = "/metrics"
+http_address = "0.0.0.0:8081"
+
+[consul]
+address = "http://127.0.0.1:8200"
+
+[consul.service]
+name = "hsmq"
+
+[consul.service.check]
+name = "health_check"
+interval = "10s"
+grpc = "localhost:4848"
+# http = "http://localhost:8080/health"
+
+[[queues]]
+type = "InMemory"
+name = "a"
+limit = 99
+ack_timeout = {h = 4}
+topics = [
+    "a.b",
+]
+
+[[queues]]
+type = "InMemory"
+name = "b"
+limit = 99
+ack_timeout = 1
+topics = [
+    "b.a",
+]
+
+[users.my_username]
+tokens = [
+    "bbb"
+]
