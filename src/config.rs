@@ -235,7 +235,7 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn from_file(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_file(path: &Path) -> anyhow::Result<Self> {
         match Self::load_file(path) {
             Ok(cfg) => Ok(cfg),
             Err(e) => {
@@ -244,7 +244,7 @@ impl Config {
             }
         }
     }
-    fn load_file(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+    fn load_file(path: &Path) -> anyhow::Result<Self> {
         let mut f = File::open(path)?;
         let mut s = vec![];
         f.read_to_end(&mut s)?;

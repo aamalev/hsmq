@@ -3,9 +3,8 @@ use std::str::FromStr;
 use tracing_subscriber::{filter, prelude::*};
 
 use crate::config;
-use crate::errors::GenericError;
 
-pub fn init_subscriber(cfg: &config::Config) -> Result<(), GenericError> {
+pub fn init_subscriber(cfg: &config::Config) -> anyhow::Result<()> {
     let level = cfg
         .tracing
         .clone()
