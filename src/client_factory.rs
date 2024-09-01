@@ -53,11 +53,10 @@ impl ClientFactory {
 
     pub async fn create_client(
         &self,
-    ) -> Result<
+    ) -> anyhow::Result<
         HsmqClient<
             InterceptedService<Channel, impl Fn(Request<()>) -> Result<Request<()>, Status>>,
         >,
-        Box<dyn std::error::Error>,
     > {
         let grpc_uri = self.config.client.grpc_uri.clone().unwrap();
         let channel = Channel::from_shared(grpc_uri)?.connect().await?;
