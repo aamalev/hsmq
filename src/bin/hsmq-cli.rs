@@ -56,7 +56,7 @@ struct Cli {
 }
 
 impl Cli {
-    async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn run(self) -> anyhow::Result<()> {
         let mut cfg = if let Some(config_path) = self.config.as_deref() {
             Config::from_file(config_path)?
         } else {
@@ -176,7 +176,7 @@ impl Command {
         client_factory: ClientFactory,
         cfg: Config,
         cli: &Cli,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<()> {
         match self {
             Command::Jwt { username } => self.jwt(
                 client_factory,
@@ -198,11 +198,7 @@ impl Command {
         Ok(())
     }
 
-    fn jwt(
-        &self,
-        client_factory: ClientFactory,
-        username: String,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn jwt(&self, client_factory: ClientFactory, username: String) -> anyhow::Result<()> {
         let claims = Claims {
             sub: username,
             exp: None,
@@ -219,7 +215,7 @@ impl Command {
         topic: String,
         data: String,
         count: u64,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<()> {
         let any = prost_types::Any {
             type_url: "string".to_string(),
             value: data.clone().into_bytes(),
@@ -265,7 +261,7 @@ impl Command {
         &self,
         client_factory: ClientFactory,
         queues: Vec<String>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<()> {
         let mut client = client_factory.create_client().await?;
         let s = SubscribeQueueRequest { queues };
         let mut stream = client.subscribe_queue(s).await?.into_inner();
@@ -274,7 +270,7 @@ impl Command {
         while let Some(item) = stream.next().await {
             match item?.kind {
                 Some(subscription_response::Kind::Message(msg)) => {
-                    log::info!("Received: {:?}", utils::repr(&msg));
+                    tracing::debug!("Received: {:?}", utils::repr(&msg));
                     count += 1;
                 }
                 Some(subscription_response::Kind::Redirect(uri)) => {
@@ -323,7 +319,7 @@ enum StreaminCommand {
 }
 
 impl StreaminCommand {
-    async fn run(&self, client_factory: ClientFactory) -> Result<(), Box<dyn std::error::Error>> {
+    async fn run(&self, client_factory: ClientFactory) -> anyhow::Result<()> {
         match self {
             StreaminCommand::SubscribeQueue {
                 queues,
@@ -370,7 +366,7 @@ impl StreaminCommand {
         qos: u32,
         limit: Arc<AtomicI64>,
         timeout: Duration,
-    ) -> Result<u64, Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<u64> {
         let (tx, rx) = mpsc::channel(1);
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         let mut client = client_factory.create_client().await?;
@@ -451,7 +447,7 @@ impl StreaminCommand {
         prefetch_count: i32,
         limit: Arc<AtomicI64>,
         timeout: Duration,
-    ) -> Result<u64, Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<u64> {
         let m_latency_hist: HashMap<_, _> = queues
             .iter()
             .map(|q| (q.to_string(), LATENCY_HIST.with_label_values(&[q])))
@@ -527,7 +523,7 @@ impl StreaminCommand {
         queue: String,
         limit: Arc<AtomicI64>,
         timeout: Duration,
-    ) -> Result<u64, Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<u64> {
         let (tx, rx) = mpsc::channel(1);
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         let mut client = client_factory.create_client().await?;
@@ -601,7 +597,7 @@ impl StreaminCommand {
         publishers: usize,
         consumers: usize,
         timeout: Duration,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<()> {
         let start = std::time::SystemTime::now();
         let publish_limit = Arc::new(AtomicI64::new(limit));
         let consume_limit = Arc::new(AtomicI64::new(limit));
@@ -673,11 +669,7 @@ enum ClusterCommand {
 }
 
 impl ClusterCommand {
-    async fn run(
-        &self,
-        _client_factory: ClientFactory,
-        cfg: Config,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn run(&self, _client_factory: ClientFactory, cfg: Config) -> anyhow::Result<()> {
         let cluster_cfg = cfg.cluster.clone().unwrap_or_default();
         let jwt_cfg = cfg.cluster_jwt();
         let jwt = jwt::JWT::new(jwt_cfg);
@@ -707,7 +699,7 @@ impl ClusterCommand {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     cli.run().await?;
