@@ -77,24 +77,20 @@ impl Subscription {
         Self { broadcast, subs }
     }
 
-    fn subscribe(&mut self, queue: GenericQueue) {
+    pub(crate) fn subscribe(&mut self, queue: GenericQueue) {
         self.subs.push(queue);
     }
 
     #[tracing::instrument(name = "subscription.publish", parent = &msg.span, skip_all, level = "debug")]
-    pub async fn publish(&self, msg: Envelop) {
+    pub async fn publish(&self, msg: Envelop) -> anyhow::Result<()> {
         let msg = Arc::new(msg);
         for q in self.subs.iter() {
-            if let Err(e) = q.publish(msg.clone()).await {
-                log::error!("Error send command {}", e);
-            }
+            q.publish(msg.clone()).await?;
         }
         if self.broadcast.receiver_count() > 0 {
-            match self.broadcast.send(msg) {
-                Ok(_) => (),
-                Err(e) => log::error!("Error send broadcast {:?}", e),
-            }
+            self.broadcast.send(msg)?;
         }
+        Ok(())
     }
 }
 
@@ -289,7 +285,7 @@ impl InMemoryQueue {
         Self { name, tx }
     }
 
-    fn new_generic(cfg: config::InMemoryQueue, task_tracker: TaskTracker) -> GenericQueue {
+    pub(crate) fn new_generic(cfg: config::InMemoryQueue, task_tracker: TaskTracker) -> GenericQueue {
         Box::new(Self::new(cfg, task_tracker))
     }
 

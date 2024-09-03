@@ -1,3 +1,5 @@
+#[cfg(feature = "sentry")]
+use sentry::IntoDsn;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
@@ -5,8 +7,22 @@ use std::io::Read;
 use std::net::SocketAddr;
 use std::path::Path;
 
-#[cfg(feature = "sentry")]
-use sentry::IntoDsn;
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct Client {
+    pub grpc_uri: Option<String>,
+    pub username: Option<String>,
+    pub http_port: Option<u16>,
+}
+
+impl Default for Client {
+    fn default() -> Self {
+        Self {
+            grpc_uri: None,
+            username: None,
+            http_port: Some(8081),
+        }
+    }
+}
 
 fn default_grpc_addr() -> Option<SocketAddr> {
     "0.0.0.0:4848".parse().ok()
@@ -271,6 +287,7 @@ impl RedisStreamConfig {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct Config {
+    pub client: Client,
     #[serde(default)]
     pub node: Node,
     pub tracing: Option<Tracing>,
@@ -287,11 +304,12 @@ pub struct Config {
     pub sentry: Sentry,
     #[cfg(feature = "consul")]
     pub consul: Option<Consul>,
+    #[serde(default)]
     pub redis: HashMap<String, RedisConfig>,
 }
 
 impl Config {
-    pub fn from_file(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_file(path: &Path) -> anyhow::Result<Self> {
         match Self::load_file(path) {
             Ok(cfg) => Ok(cfg),
             Err(e) => {
@@ -300,7 +318,7 @@ impl Config {
             }
         }
     }
-    fn load_file(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+    fn load_file(path: &Path) -> anyhow::Result<Self> {
         let mut f = File::open(path)?;
         let mut s = vec![];
         f.read_to_end(&mut s)?;

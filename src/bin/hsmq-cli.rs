@@ -1,10 +1,11 @@
-use base64::{engine::general_purpose::STANDARD, Engine};
+use clap::{command, Parser, Subcommand};
 use http::uri::Uri;
 use lazy_static::lazy_static;
 use opentelemetry::global;
 use prometheus::proto::LabelPair;
 use prometheus::{register_histogram_vec, Encoder, HistogramVec, TextEncoder};
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::{
@@ -13,48 +14,16 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
 use tokio_util::task::task_tracker::TaskTracker;
-use tonic::metadata::MetadataValue;
-use tonic::service::interceptor::InterceptedService;
-use tonic::Status;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-pub mod pb {
-    tonic::include_proto!("hsmq.v1.hsmq");
-}
-
-#[path = "../config.rs"]
-pub mod config;
-use crate::cluster::{JwtPackage, Package};
-use crate::config::Config;
-
-#[path = ".."]
-mod hsmq {
-    pub mod tracing;
-}
-
-#[path = "../utils.rs"]
-pub mod utils;
-
-#[path = "../errors.rs"]
-pub mod errors;
-
-#[path = "../metrics.rs"]
-pub mod metrics;
-
-#[path = "../jwt.rs"]
-pub mod jwt;
-
-#[path = "../cluster.rs"]
-pub mod cluster;
-
-use clap::{command, Parser, Subcommand};
-use jsonwebtoken::{encode, EncodingKey, Header};
-use pb::{hsmq_client::HsmqClient, subscription_response, Message, SubscribeQueueRequest};
-use serde::{Deserialize, Serialize};
-use tokio_stream::StreamExt;
-use tonic::{transport::Channel, Request};
+use client_factory::ClientFactory;
+use cluster::{JwtPackage, Package};
+use config::Config;
+use hsmq::{client_factory, cluster, config, jwt, pb, utils};
+use pb::{subscription_response, Message, SubscribeQueueRequest};
 
 lazy_static! {
     pub static ref LATENCY_HIST: HistogramVec =
@@ -65,101 +34,6 @@ lazy_static! {
 struct Claims {
     sub: String,
     exp: Option<usize>,
-}
-
-#[derive(Clone, Debug)]
-struct ClientFactory {
-    config: Config,
-    grpc_uri: String,
-    username: String,
-}
-
-impl ClientFactory {
-    fn new(config: Config, grpc_uri: String, username: String) -> Self {
-        Self {
-            config,
-            grpc_uri,
-            username,
-        }
-    }
-
-    fn gen_jwt<T>(&self, claims: T) -> Option<String>
-    where
-        T: Serialize,
-    {
-        let mut result = None;
-        for secret in self
-            .config
-            .auth
-            .jwt
-            .clone()
-            .expect("Not found jwt secrets")
-            .secrets
-            .iter()
-        {
-            if let Some(secret) = secret.resolve() {
-                result = encode(
-                    &Header::default(),
-                    &claims,
-                    &EncodingKey::from_secret(secret.as_ref()),
-                )
-                .ok();
-                break;
-            }
-        }
-        result
-    }
-
-    async fn create_client(
-        &self,
-    ) -> Result<
-        HsmqClient<
-            InterceptedService<Channel, impl Fn(Request<()>) -> Result<Request<()>, Status>>,
-        >,
-        Box<dyn std::error::Error>,
-    > {
-        let channel = Channel::from_shared(self.grpc_uri.to_string())?
-            .connect()
-            .await?;
-
-        let users = if let Some(user) = self.config.users.get(&self.username) {
-            let mut result = HashMap::new();
-            result.insert(self.username.clone(), user.clone());
-            result
-        } else {
-            self.config.users.clone()
-        };
-
-        let claims = Claims {
-            sub: self.username.clone(),
-            exp: Some((utils::current_time() + Duration::from_secs(3600)).as_secs() as usize),
-        };
-        let token = if let Some(token) = self.gen_jwt(claims) {
-            Some(token)
-        } else {
-            let mut token = None;
-            for user in users.values() {
-                for t in user.tokens.iter() {
-                    if let Some(t) = t.resolve() {
-                        token = Some(t);
-                    };
-                }
-            }
-            token
-        };
-        let header: MetadataValue<_> = if let Some(token) = token {
-            format!("Bearer {}", token)
-        } else {
-            let up = format!("{}:", &self.username);
-            format!("Basic {}", STANDARD.encode(up))
-        }
-        .parse()?;
-        let client = HsmqClient::with_interceptor(channel, move |mut req: Request<()>| {
-            req.metadata_mut().insert("authorization", header.clone());
-            Ok(req)
-        });
-        Ok(client)
-    }
 }
 
 #[derive(Parser)]
@@ -182,42 +56,49 @@ struct Cli {
 }
 
 impl Cli {
-    async fn run(mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let cfg = if let Some(config_path) = self.config.as_deref() {
+    async fn run(self) -> anyhow::Result<()> {
+        let mut cfg = if let Some(config_path) = self.config.as_deref() {
             Config::from_file(config_path)?
         } else {
             Config::default()
         };
         hsmq::tracing::init_subscriber(&cfg)?;
 
-        let mut grpc_addr = if let Some(ref grpc_uri) = self.grpc_uri {
-            grpc_uri.to_string()
-        } else {
-            cfg.node.grpc_address.map(|v| v.to_string()).unwrap()
-        };
-        if !grpc_addr.starts_with("http") {
-            grpc_addr = format!("http://{}", grpc_addr);
-        };
+        cfg.client.grpc_uri = self
+            .grpc_uri
+            .clone()
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .or(cfg.client.grpc_uri)
+            .filter(|s| !s.is_empty())
+            .or(cfg.node.grpc_address.map(|sa| sa.to_string()))
+            .map(|s| {
+                if !s.starts_with("http") {
+                    format!("http://{}", s)
+                } else {
+                    s
+                }
+            });
 
-        let username = self
+        cfg.client.username = self
             .username
             .clone()
-            .unwrap_or_else(|| std::env::var("USER").unwrap_or_default());
-        self.username = if username.is_empty() {
-            None
-        } else {
-            Some(username.clone())
-        };
+            .filter(|s| !s.is_empty())
+            .or(cfg.client.username)
+            .filter(|s| !s.is_empty())
+            .or(std::env::var("USER").ok())
+            .filter(|s| !s.is_empty());
 
         if let Some(ref p) = cfg.prometheus {
-            if let Some(ref addr) = p.http_address {
-                let mut addr = *addr;
-                addr.set_port(8081);
-                tokio::spawn(Self::prometheus(addr, p.url.to_string()));
+            if let Some(port) = cfg.client.http_port {
+                tokio::spawn(Self::prometheus(
+                    format!("0.0.0.0:{}", port).parse().unwrap(),
+                    p.url.to_string(),
+                ));
             }
         }
 
-        let factory = ClientFactory::new(cfg.clone(), grpc_addr, username);
+        let factory = ClientFactory::new(cfg.clone());
         self.command.run(factory, cfg, &self).await?;
 
         Ok(())
@@ -295,7 +176,7 @@ impl Command {
         client_factory: ClientFactory,
         cfg: Config,
         cli: &Cli,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<()> {
         match self {
             Command::Jwt { username } => self.jwt(
                 client_factory,
@@ -317,11 +198,7 @@ impl Command {
         Ok(())
     }
 
-    fn jwt(
-        &self,
-        client_factory: ClientFactory,
-        username: String,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn jwt(&self, client_factory: ClientFactory, username: String) -> anyhow::Result<()> {
         let claims = Claims {
             sub: username,
             exp: None,
@@ -338,7 +215,7 @@ impl Command {
         topic: String,
         data: String,
         count: u64,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<()> {
         let any = prost_types::Any {
             type_url: "string".to_string(),
             value: data.clone().into_bytes(),
@@ -384,7 +261,7 @@ impl Command {
         &self,
         client_factory: ClientFactory,
         queues: Vec<String>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<()> {
         let mut client = client_factory.create_client().await?;
         let s = SubscribeQueueRequest { queues };
         let mut stream = client.subscribe_queue(s).await?.into_inner();
@@ -393,7 +270,7 @@ impl Command {
         while let Some(item) = stream.next().await {
             match item?.kind {
                 Some(subscription_response::Kind::Message(msg)) => {
-                    log::info!("Received: {:?}", utils::repr(&msg));
+                    tracing::debug!("Received: {:?}", utils::repr(&msg));
                     count += 1;
                 }
                 Some(subscription_response::Kind::Redirect(uri)) => {
@@ -442,7 +319,7 @@ enum StreaminCommand {
 }
 
 impl StreaminCommand {
-    async fn run(&self, client_factory: ClientFactory) -> Result<(), Box<dyn std::error::Error>> {
+    async fn run(&self, client_factory: ClientFactory) -> anyhow::Result<()> {
         match self {
             StreaminCommand::SubscribeQueue {
                 queues,
@@ -489,7 +366,7 @@ impl StreaminCommand {
         qos: u32,
         limit: Arc<AtomicI64>,
         timeout: Duration,
-    ) -> Result<u64, Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<u64> {
         let (tx, rx) = mpsc::channel(1);
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         let mut client = client_factory.create_client().await?;
@@ -522,7 +399,7 @@ impl StreaminCommand {
                 .instrument(tracing::trace_span!(parent: &span, "publish"))
                 .await
             {
-                log::error!("Publusher error {e:?}");
+                log::error!("Publisher error {e:?}");
                 break;
             } else if limit.fetch_sub(1, Ordering::Acquire) <= 1 {
                 counter += 1;
@@ -570,7 +447,7 @@ impl StreaminCommand {
         prefetch_count: i32,
         limit: Arc<AtomicI64>,
         timeout: Duration,
-    ) -> Result<u64, Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<u64> {
         let m_latency_hist: HashMap<_, _> = queues
             .iter()
             .map(|q| (q.to_string(), LATENCY_HIST.with_label_values(&[q])))
@@ -646,7 +523,7 @@ impl StreaminCommand {
         queue: String,
         limit: Arc<AtomicI64>,
         timeout: Duration,
-    ) -> Result<u64, Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<u64> {
         let (tx, rx) = mpsc::channel(1);
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         let mut client = client_factory.create_client().await?;
@@ -720,7 +597,7 @@ impl StreaminCommand {
         publishers: usize,
         consumers: usize,
         timeout: Duration,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> anyhow::Result<()> {
         let start = std::time::SystemTime::now();
         let publish_limit = Arc::new(AtomicI64::new(limit));
         let consume_limit = Arc::new(AtomicI64::new(limit));
@@ -792,15 +669,11 @@ enum ClusterCommand {
 }
 
 impl ClusterCommand {
-    async fn run(
-        &self,
-        _client_factory: ClientFactory,
-        cfg: Config,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn run(&self, _client_factory: ClientFactory, cfg: Config) -> anyhow::Result<()> {
         let cluster_cfg = cfg.cluster.clone().unwrap_or_default();
         let jwt_cfg = cfg.cluster_jwt();
-        let jwt = crate::jwt::JWT::new(jwt_cfg);
-        let sock = crate::cluster::JwtSocket::bind("0.0.0.0:0", jwt).await?;
+        let jwt = jwt::JWT::new(jwt_cfg);
+        let sock = cluster::JwtSocket::bind("0.0.0.0:0", jwt).await?;
 
         match self {
             ClusterCommand::Join { address } => {
@@ -826,7 +699,7 @@ impl ClusterCommand {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     cli.run().await?;

@@ -9,6 +9,7 @@ use crate::server::{
     self, Consumer, ConsumerSendResult, Envelop, GenericConsumer, HsmqServer, QueueCommand,
     Subscription,
 };
+
 use prometheus::core::{AtomicF64, GenericCounter, GenericGauge};
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
@@ -16,6 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use std::{error::Error, io::ErrorKind};
+use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
@@ -36,7 +38,7 @@ impl GrpcService {
     pub fn new(addr: SocketAddr, task_tracker: TaskTracker) -> Self {
         Self { addr, task_tracker }
     }
-    pub async fn run(&self, hsmq: HsmqServer, auth: Arc<Auth>) {
+    pub async fn run(&self, hsmq: HsmqServer, auth: Arc<Auth>, listener: Option<TcpListener>) {
         let task_tracker = self.task_tracker.clone();
 
         let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
@@ -47,10 +49,19 @@ impl GrpcService {
         let svc =
             hsmq_server::HsmqServer::with_interceptor(hsmq, move |req| auth.grpc_check_auth(req));
         log::info!("Run grpc on {:?}", &self.addr);
+
+        let incoming = match listener {
+            Some(l) => l,
+            None => TcpListener::bind(self.addr).await.unwrap(),
+        };
+
         if let Err(e) = TonicServer::builder()
             .add_service(health_service)
             .add_service(svc)
-            .serve_with_shutdown(self.addr, async move { task_tracker.wait().await })
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(incoming),
+                async move { task_tracker.wait().await },
+            )
             .await
         {
             self.task_tracker.close();
@@ -532,7 +543,7 @@ impl GrpcStreaming {
         }
     }
 
-    async fn req_kind(&mut self, kind: pb::request::Kind) -> Result<(), GenericError> {
+    async fn req_kind(&mut self, kind: pb::request::Kind) -> anyhow::Result<()> {
         match kind {
             pb::request::Kind::PublishMessage(pb::PublishMessage {
                 message: Some(message),
@@ -546,7 +557,10 @@ impl GrpcStreaming {
                 span.set_parent(envelop.span.context());
 
                 if let Some(subscription) = self.subscriptions.get(&topic) {
-                    subscription.publish(envelop).await;
+                    subscription
+                        .publish(envelop)
+                        .await
+                        .map_err(|_| anyhow::anyhow!("Publish error"))?;
                     self.m_publish_ok.inc();
                     if qos == 1 {
                         let kind = Some(pb::response::Kind::PubAck(pb::PubAck { request_id }));
@@ -560,7 +574,7 @@ impl GrpcStreaming {
                         topic,
                         info: m.to_string(),
                     }));
-                    self.out_tx.send(Ok(pb::Response { kind })).await?;
+                    let _ = self.out_tx.send(Ok(pb::Response { kind })).await;
                     return Err(Status::not_found(m))?;
                 }
             }
@@ -574,12 +588,15 @@ impl GrpcStreaming {
                         let consumer = GrpcConsumer::new_box(
                             self.consumer_id,
                             self.out_tx.clone(),
-                            self.server_tx.clone(),
+                               self.server_tx.clone(),
                             q,
                             prefetch_count as usize,
                             false,
                         );
-                        let q = queue.subscribe(consumer).await?;
+                        let q = queue
+                            .subscribe(consumer)
+                            .await
+                            .map_err(|_| anyhow::anyhow!("Subscribe error"))?;
                         self.subs.insert(queue_name.clone(), q);
                     }
                 }
@@ -632,7 +649,10 @@ impl GrpcStreaming {
                         0,
                         autoack,
                     );
-                    let mut subscriber = qu.subscribe(consumer).await?;
+                    let mut subscriber = qu
+                        .subscribe(consumer)
+                        .await
+                        .map_err(|_| anyhow::anyhow!("Subscribe error"))?;
                     let r = subscriber.fetch(deadline).await;
                     self.subs.insert(queue.clone(), subscriber);
                     r.map_err(|e| {
@@ -688,8 +708,145 @@ fn match_for_io_error(err_status: &Status) -> Option<&std::io::Error> {
 
 #[cfg(test)]
 mod tests {
+    use tokio_stream::StreamExt;
     use crate::pb::{hsmq_server::Hsmq, Message};
-    use crate::server::{HsmqServer, Subscription};
+    use crate::server::{HsmqServer, InMemoryQueue, Subscription};
+    use crate::config;
+
+    mod tonic_mock {
+        mod mock {
+            use bytes::{Buf, BufMut, Bytes, BytesMut};
+            use http_body::{Body, Frame};
+            use prost::Message;
+            use std::{
+                collections::VecDeque,
+                marker::PhantomData,
+                pin::Pin,
+                task::{Context, Poll},
+            };
+            use tonic::{
+                codec::{DecodeBuf, Decoder},
+                Status,
+            };
+
+            #[derive(Clone)]
+            pub struct MockBody {
+                data: VecDeque<Bytes>,
+            }
+
+            impl MockBody {
+                pub fn new(data: Vec<impl Message>) -> Self {
+                    let mut queue: VecDeque<Bytes> = VecDeque::with_capacity(16);
+                    for msg in data {
+                        let buf = Self::encode(msg);
+                        queue.push_back(buf);
+                    }
+
+                    MockBody { data: queue }
+                }
+
+                pub fn is_empty(&self) -> bool {
+                    self.data.is_empty()
+                }
+
+                // see: https://github.com/hyperium/tonic/blob/1b03ece2a81cb7e8b1922b3c3c1f496bd402d76c/tonic/src/codec/encode.rs#L52
+                fn encode(msg: impl Message) -> Bytes {
+                    let mut buf = BytesMut::with_capacity(256);
+
+                    buf.reserve(5);
+                    unsafe {
+                        buf.advance_mut(5);
+                    }
+                    msg.encode(&mut buf).unwrap();
+                    {
+                        let len = buf.len() - 5;
+                        let mut buf = &mut buf[..5];
+                        buf.put_u8(0); // byte must be 0, reserve doesn't auto-zero
+                        buf.put_u32(len as u32);
+                    }
+                    buf.freeze()
+                }
+            }
+
+            impl Body for MockBody {
+                type Data = Bytes;
+                type Error = Status;
+
+                fn poll_frame(
+                    mut self: Pin<&mut Self>,
+                    _: &mut Context<'_>,
+                ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+                    if !self.is_end_stream() {
+                        let msg = self.data.pop_front().unwrap();
+                        Poll::Ready(Some(Ok(Frame::data(msg))))
+                    } else {
+                        Poll::Ready(None)
+                    }
+                }
+
+                fn is_end_stream(&self) -> bool {
+                    self.is_empty()
+                }
+
+            }
+            /// A [`Decoder`] that knows how to decode `U`.
+            #[derive(Debug, Clone, Default)]
+            pub struct ProstDecoder<U>(PhantomData<U>);
+
+            impl<U> ProstDecoder<U> {
+                pub fn new() -> Self {
+                    Self(PhantomData)
+                }
+            }
+
+            impl<U: Message + Default> Decoder for ProstDecoder<U> {
+                type Item = U;
+                type Error = Status;
+
+                fn decode(&mut self, buf: &mut DecodeBuf<'_>) -> Result<Option<Self::Item>, Self::Error> {
+                    let item = Message::decode(buf.chunk())
+                        .map(Some)
+                        .map_err(|e| Status::internal(e.to_string()))?;
+
+                    buf.advance(buf.chunk().len());
+                    Ok(item)
+                }
+            }
+        }
+
+        use futures::{Stream, StreamExt};
+        use prost::Message;
+        use std::pin::Pin;
+        use tonic::{Request, Response, Status, Streaming};
+
+        pub use mock::{MockBody, ProstDecoder};
+        pub type StreamResponseInner<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
+        pub type StreamResponse<T> = Response<StreamResponseInner<T>>;
+
+        pub fn streaming_request<T>(messages: Vec<T>) -> Request<Streaming<T>>
+        where
+            T: Message + Default + 'static,
+        {
+            let body = MockBody::new(messages);
+            let decoder: ProstDecoder<T> = ProstDecoder::new();
+            let stream = Streaming::new_request(decoder, body, None, None);
+
+            Request::new(stream)
+        }
+
+        pub async fn process_streaming_response<T, F>(response: StreamResponse<T>, f: F)
+        where
+            T: Message + Default + 'static,
+            F: Fn(Result<T, Status>, usize),
+        {
+            let mut i: usize = 0;
+            let mut messages = response.into_inner();
+            while let Some(v) = messages.next().await {
+                f(v, i);
+                i += 1;
+            }
+        }
+    }
 
     #[tokio::test]
     async fn srv_publish_no_subs() {
@@ -709,5 +866,45 @@ mod tests {
         let req = tonic::Request::new(msg);
         let result = srv.publish(req).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn consume_streaming() {
+        let queue_name = "a".to_string();
+        let topic = "a.b".to_string();
+
+        let mut srv = HsmqServer::default();
+        let subscriptions = &mut srv.subscriptions;
+        let queues = &mut srv.queues;
+
+        let cfg_queue = config::InMemoryQueue{
+            name: queue_name.clone(),
+            topics: vec![topic.clone()],
+            limit: Some(99),
+            ack_timeout: config::Duration::Seconds{s: 2f32 },
+            prefetch_count: 1,
+        };
+
+        let q = InMemoryQueue::new_generic(cfg_queue.clone(), srv.task_tracker.clone());
+        let sub = subscriptions.entry(topic.clone()).or_insert_with(Subscription::new);
+        sub.subscribe(q.clone());
+        queues.insert(queue_name.clone(), q);
+
+        let mut msg = Message::default();
+        msg.topic.clone_from(&topic);
+        let req = tonic::Request::new(msg);
+        let result = srv.publish(req).await;
+        assert!(result.is_ok());
+
+        let cmd = crate::pb::SubscribeQueue {
+            queues: vec![queue_name],
+            prefetch_count: 1,
+        };
+        let kind = Some(crate::pb::request::Kind::SubscribeQueue(cmd));
+        let req = tonic_mock::streaming_request(vec![crate::pb::Request { kind }]);
+        let mut result = srv.streaming(req).await.unwrap().into_inner();
+
+        assert!(result.next().await.unwrap().is_ok());
+        assert!(result.next().await.is_none());
     }
 }

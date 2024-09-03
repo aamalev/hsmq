@@ -5,7 +5,6 @@ use std::time::Duration;
 use tokio::{io::ErrorKind, net::UdpSocket, select};
 use tokio_util::task::task_tracker::TaskTracker;
 
-use crate::errors::GenericError;
 use crate::jwt::JWT;
 use crate::{config, utils};
 
@@ -55,18 +54,18 @@ impl From<Package> for JwtPackage {
     }
 }
 
-pub(crate) struct JwtSocket {
+pub struct JwtSocket {
     socket: UdpSocket,
     jwt: JWT,
 }
 
 impl JwtSocket {
-    pub async fn bind(addr: &str, jwt: JWT) -> Result<Self, GenericError> {
+    pub async fn bind(addr: &str, jwt: JWT) -> anyhow::Result<Self> {
         let socket = UdpSocket::bind(addr).await?;
         Ok(Self { socket, jwt })
     }
 
-    fn decode(&self, b: &[u8]) -> Result<JwtPackage, GenericError> {
+    fn decode(&self, b: &[u8]) -> anyhow::Result<JwtPackage> {
         let s = String::from_utf8_lossy(b);
         let p = self.jwt.decode::<JwtPackage>(&s)?;
         Ok(p)
@@ -109,11 +108,11 @@ impl JwtSocket {
         }
     }
 
-    fn encode(&self, pack: Package) -> Result<String, GenericError> {
+    fn encode(&self, pack: Package) -> anyhow::Result<String> {
         Ok(self.jwt.encode(JwtPackage::new(pack))?)
     }
 
-    pub async fn send_to(&self, pack: Package, addr: &str) -> Result<(), GenericError> {
+    pub async fn send_to(&self, pack: Package, addr: &str) -> anyhow::Result<()> {
         let s = self.encode(pack)?;
         self.socket.send_to(s.as_bytes(), addr).await?;
         Ok(())
@@ -164,7 +163,7 @@ impl Cluster {
         &mut self,
         sock: &JwtSocket,
         jwt_pack: JwtPackage,
-    ) -> Result<(), GenericError> {
+    ) -> anyhow::Result<()> {
         match &jwt_pack.pack {
             Package::Node { name, node } => {
                 let mut node = node.clone();

@@ -1,3 +1,8 @@
+[client]
+grpc_uri = "0.0.0.0:4848"
+http_port = 8083
+username = "my_username"
+
 [node]
 # grpc_address = "[::1]:4848"  # IPv6
 grpc_address = "0.0.0.0:4848"  # IPv4
