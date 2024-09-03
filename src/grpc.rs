@@ -255,10 +255,15 @@ where
         let consumer = self.clone();
         let prefetch = self.inner.prefetch_count > 0;
         let timeout = unack.timeout;
-        if prefetch {
+
+        if self.inner.is_ackable {
             unack.insert(msg.clone());
+        }
+
+        if prefetch {
             self.inner.prefetch_semaphore.forget_permits(1);
         }
+
         tasks.spawn(async move {
             if consumer.send_message(msg.clone()).await.is_err() {
                 ConsumerSendResult::RequeueAck(msg)
