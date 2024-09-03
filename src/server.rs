@@ -285,7 +285,10 @@ impl InMemoryQueue {
         Self { name, tx }
     }
 
-    pub(crate) fn new_generic(cfg: config::InMemoryQueue, task_tracker: TaskTracker) -> GenericQueue {
+    pub(crate) fn new_generic(
+        cfg: config::InMemoryQueue,
+        task_tracker: TaskTracker,
+    ) -> GenericQueue {
         Box::new(Self::new(cfg, task_tracker))
     }
 
