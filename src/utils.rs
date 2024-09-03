@@ -49,7 +49,7 @@ mod tests {
     async fn repr_test() {
         let msg = Message::default();
         let r = repr(&msg);
-        assert!(r.len() > 0);
+        assert!(!r.is_empty());
     }
 
     #[tokio::test]
