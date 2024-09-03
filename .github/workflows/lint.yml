@@ -29,5 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare
+        run: sudo apt install -y protobuf-compiler
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features
