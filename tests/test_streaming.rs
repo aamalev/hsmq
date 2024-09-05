@@ -71,6 +71,8 @@ async fn test_streaming() {
         for _ in 0..10 {
             let item = stream.next();
             let a = item.await.unwrap();
+
+            #[allow(clippy::single_match)]
             match a.clone().unwrap().kind {
                 Some(hsmq::pb::response::Kind::Message(msg)) => {
                     ids.push(
