@@ -21,7 +21,7 @@ http = "1.1.0"
 jsonwebtoken = "9.3.0"
 lazy_static = "1.4.0"
 log = "0.4.21"
-opentelemetry = "0.23.0"
+opentelemetry = "0.24.0"
 opentelemetry_sdk = { version = "0.24.1", features = ["rt-tokio"] }
 prometheus = { version = "0.13.3", features = ["process"] }
 prost = "0.13.1"
@@ -35,7 +35,7 @@ toml = "0.8.12"
 tonic = "0.12.1"
 tonic-health = "0.12.1"
 tracing = "0.1.40"
-tracing-opentelemetry = "0.24.0"
+tracing-opentelemetry = "0.25.0"
 tracing-subscriber = "0.3.18"
 uuid = { version = "1.8.0", features = ["v4", "v7"] }
 sentry = { version = "0.34.0", optional = true }
