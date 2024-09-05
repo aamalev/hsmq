@@ -125,8 +125,10 @@ mod tests {
             .push(crate::config::ResolvableValue::Value("123".to_string()));
         cfg.jwt = Some(jwt);
         let auth = Auth::new(cfg);
-        let mut claims = Claims::default();
-        claims.exp = Some((utils::current_time() + Duration::from_secs(3600)).as_secs() as usize);
+        let claims = Claims {
+            exp: Some((utils::current_time() + Duration::from_secs(3600)).as_secs() as usize),
+            ..Default::default()
+        };
         let token = auth
             .jwt
             .as_ref()
