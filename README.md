@@ -1,6 +1,11 @@
 # hsmq
 Horizontal Scalable Message Queue Broker
 
+[![rustc](https://img.shields.io/badge/Rustc-1.79.0-blue?logo=rust)](https://www.rust-lang.org/)
+[![cargo clippy](https://img.shields.io/badge/cargo-clippy-blue?logo=rust)](https://doc.rust-lang.org/stable/clippy/)
+[![Actions Status](https://github.com/aamalev/hsmq/actions/workflows/lint.yml/badge.svg)](https://github.com/aamalev/hsmq/actions)
+[![Actions Status](https://github.com/aamalev/hsmq/actions/workflows/rust.yml/badge.svg)](https://github.com/aamalev/hsmq/actions)
+
 ## Features
 
 - [x] Interface
