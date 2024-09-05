@@ -326,7 +326,7 @@ impl hsmq_server::Hsmq for HsmqServer {
         if let Some(subscription) = self.subscriptions.get(&topic) {
             GRPC_COUNTER.with_label_values(&["publish", "ok"]).inc();
             let kind = Some(publish_response::Kind::MessageMeta(envelop.meta.clone()));
-            subscription.publish(envelop.with_generated_id()).await;
+            let _ = subscription.publish(envelop.with_generated_id()).await;
             Ok(Response::new(PublishResponse { kind }))
         } else {
             GRPC_COUNTER.with_label_values(&["publish", "error"]).inc();
@@ -356,7 +356,7 @@ impl hsmq_server::Hsmq for HsmqServer {
                     span.set_parent(envelop.span.context());
 
                     if let Some(subscription) = self.subscriptions.get(&topic) {
-                        subscription.publish(envelop).await;
+                        let _ = subscription.publish(envelop).await;
                         m_publish_ok.inc();
                         count += 1;
                     } else {
@@ -593,7 +593,7 @@ impl GrpcStreaming {
                         let consumer = GrpcConsumer::new_box(
                             self.consumer_id,
                             self.out_tx.clone(),
-                               self.server_tx.clone(),
+                            self.server_tx.clone(),
                             q,
                             prefetch_count as usize,
                             false,
@@ -713,10 +713,10 @@ fn match_for_io_error(err_status: &Status) -> Option<&std::io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use tokio_stream::StreamExt;
+    use crate::config;
     use crate::pb::{hsmq_server::Hsmq, Message};
     use crate::server::{HsmqServer, InMemoryQueue, Subscription};
-    use crate::config;
+    use tokio_stream::StreamExt;
 
     mod tonic_mock {
         mod mock {
@@ -792,7 +792,6 @@ mod tests {
                 fn is_end_stream(&self) -> bool {
                     self.is_empty()
                 }
-
             }
             /// A [`Decoder`] that knows how to decode `U`.
             #[derive(Debug, Clone, Default)]
@@ -808,7 +807,10 @@ mod tests {
                 type Item = U;
                 type Error = Status;
 
-                fn decode(&mut self, buf: &mut DecodeBuf<'_>) -> Result<Option<Self::Item>, Self::Error> {
+                fn decode(
+                    &mut self,
+                    buf: &mut DecodeBuf<'_>,
+                ) -> Result<Option<Self::Item>, Self::Error> {
                     let item = Message::decode(buf.chunk())
                         .map(Some)
                         .map_err(|e| Status::internal(e.to_string()))?;
@@ -839,6 +841,7 @@ mod tests {
             Request::new(stream)
         }
 
+        #[allow(dead_code)]
         pub async fn process_streaming_response<T, F>(response: StreamResponse<T>, f: F)
         where
             T: Message + Default + 'static,
@@ -882,16 +885,18 @@ mod tests {
         let subscriptions = &mut srv.subscriptions;
         let queues = &mut srv.queues;
 
-        let cfg_queue = config::InMemoryQueue{
+        let cfg_queue = config::InMemoryQueue {
             name: queue_name.clone(),
             topics: vec![topic.clone()],
             limit: Some(99),
-            ack_timeout: config::Duration::Seconds{s: 2f32 },
+            ack_timeout: config::Duration::Seconds { s: 2f32 },
             prefetch_count: 1,
         };
 
         let q = InMemoryQueue::new_generic(cfg_queue.clone(), srv.task_tracker.clone());
-        let sub = subscriptions.entry(topic.clone()).or_insert_with(Subscription::new);
+        let sub = subscriptions
+            .entry(topic.clone())
+            .or_insert_with(Subscription::new);
         sub.subscribe(q.clone());
         queues.insert(queue_name.clone(), q);
 

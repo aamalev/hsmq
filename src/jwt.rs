@@ -114,9 +114,9 @@ mod tests {
 
     #[tokio::test]
     async fn jwt_decode_ok() {
-        let mut claims = Claims::default();
-        claims.exp = Some((utils::current_time() + Duration::from_secs(3600)).as_secs_f64());
-
+        let claims = Claims {
+            exp: Some((utils::current_time() + Duration::from_secs(3600)).as_secs_f64()),
+        };
         let mut cfg = config::JWT::default();
         cfg.secrets
             .push(crate::config::ResolvableValue::Value(SECRET.to_string()));
@@ -129,8 +129,7 @@ mod tests {
 
     #[tokio::test]
     async fn jwt_decode_expired() {
-        let mut claims = Claims::default();
-        claims.exp = Some(0.0);
+        let claims = Claims { exp: Some(0.0) };
         let mut cfg = config::JWT::default();
         cfg.secrets
             .push(crate::config::ResolvableValue::Value(SECRET.to_string()));

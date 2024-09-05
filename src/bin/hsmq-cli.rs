@@ -410,9 +410,7 @@ impl StreaminCommand {
             if qos == 1 {
                 let oitem = tokio::select! {
                     x = stream.next() => x,
-                    _ = tokio::time::sleep(timeout) => if timeout_serias > 100 {
-                        break;
-                    } else if limit.load(Ordering::Relaxed) <= 1 {
+                    _ = tokio::time::sleep(timeout) => if (timeout_serias > 100) || (limit.load(Ordering::Relaxed) <= 1) {
                         break;
                     } else {
                         timeout_serias += 1;
@@ -469,9 +467,7 @@ impl StreaminCommand {
         loop {
             let oitem = tokio::select! {
                 x = stream.next() => x,
-                _ = tokio::time::sleep(timeout) => if timeout_serias > 100 {
-                    break;
-                } else if limit.load(Ordering::Relaxed) <= 1 {
+                _ = tokio::time::sleep(timeout) => if (timeout_serias > 100) || (limit.load(Ordering::Relaxed) <= 1) {
                     break;
                 } else {
                     timeout_serias += 1;
@@ -546,9 +542,9 @@ impl StreaminCommand {
 
             let oitem = tokio::select! {
                 x = stream.next() => x,
-                _ = tokio::time::sleep(timeout) => if timeout_serias > 100 {
-                    break;
-                } else if limit.load(Ordering::Relaxed) <= 1 {
+                _ = tokio::time::sleep(timeout) => if
+                    (timeout_serias > 100)
+                    || (limit.load(Ordering::Relaxed) <= 1) {
                     break;
                 } else {
                     timeout_serias += 1;
@@ -588,6 +584,7 @@ impl StreaminCommand {
         Ok(count)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn bench_queue(
         &self,
         client_factory: ClientFactory,
