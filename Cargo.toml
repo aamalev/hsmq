@@ -9,14 +9,14 @@ default-run = "hsmq"
 [dependencies]
 anyhow = "1.0.86"
 axum = { version = "0.7.5", features = ["ws", "http2"] }
-axum-test = "15.3.0"
+axum-test = "15.7.0"
 base64 = "0.22.0"
-clap = { version = "4.5.4", features = ["derive"] }
+clap = { version = "4.5.17", features = ["derive"] }
 console-subscriber = { version = "0.4.0", optional = true }
 consulrs = { version = "0.1.0", optional = true }
 futures = "0.3.30"
 gethostname = "0.5.0"
-h2 = "0.4.4"
+h2 = "0.4.6"
 http = "1.1.0"
 jsonwebtoken = "9.3.0"
 lazy_static = "1.4.0"
@@ -24,16 +24,16 @@ log = "0.4.21"
 opentelemetry = "0.24.0"
 opentelemetry_sdk = { version = "0.24.1", features = ["rt-tokio"] }
 prometheus = { version = "0.13.3", features = ["process"] }
-prost = "0.13.1"
-prost-types = "0.13.1"
+prost = "0.13.2"
+prost-types = "0.13.2"
 rand = "0.8.5"
-serde = { version = "1.0.197", features = ["derive"] }
-tokio = { version = "1.37.0", features = ["macros", "rt-multi-thread", "signal"] }
-tokio-stream = { version = "0.1.15", features = ["net"] }
-tokio-util = { version = "0.7.10", features = ["rt", "time"] }
-toml = "0.8.12"
-tonic = "0.12.1"
-tonic-health = "0.12.1"
+serde = { version = "1.0.209", features = ["derive"] }
+tokio = { version = "1.40.0", features = ["macros", "rt-multi-thread", "signal", "tracing"] }
+tokio-stream = { version = "0.1.16", features = ["net"] }
+tokio-util = { version = "0.7.12", features = ["rt", "time"] }
+toml = "0.8.19"
+tonic = "0.12.2"
+tonic-health = "0.12.2"
 tracing = "0.1.40"
 tracing-opentelemetry = "0.25.0"
 tracing-subscriber = "0.3.18"
@@ -46,7 +46,7 @@ bytes = "1.7.1"
 http-body = "1.0.1"
 
 [build-dependencies]
-tonic-build = "0.12.1"
+tonic-build = "0.12.2"
 
 [features]
 console = ["dep:console-subscriber"]
