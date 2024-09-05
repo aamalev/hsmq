@@ -1,4 +1,4 @@
-name: Lint
+name: Rustfmt
 
 env:
   RUSTFLAGS: "-Dwarnings"
@@ -23,13 +23,3 @@ jobs:
           components: rustfmt
       - name: cargo fmt
         run: cargo fmt --all -- --check
-
-  clippy:
-    name: Rust Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Prepare
-        run: sudo apt install -y protobuf-compiler
-      - name: Run Clippy
-        run: cargo clippy --all-targets --all-features
