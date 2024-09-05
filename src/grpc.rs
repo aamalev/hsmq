@@ -836,6 +836,7 @@ mod tests {
             Request::new(stream)
         }
 
+        #[allow(dead_code)]
         pub async fn process_streaming_response<T, F>(response: StreamResponse<T>, f: F)
         where
             T: Message + Default + 'static,
