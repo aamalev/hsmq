@@ -402,12 +402,12 @@ impl RedisStreamR {
             .await
             .inspect_err(|_| self.inner.m_xread_err.inc())?
         {
-            redis::Value::Bulk(mut b) => {
+            redis::Value::Array(mut b) => {
                 let mut msg_id = String::default();
                 let mut msg = pb::Message::default();
-                if let Some(redis::Value::Bulk(mut b)) = b.pop() {
-                    if let Some(redis::Value::Bulk(mut b)) = b.pop() {
-                        if let Some(redis::Value::Bulk(mut b)) = b.pop() {
+                if let Some(redis::Value::Array(mut b)) = b.pop() {
+                    if let Some(redis::Value::Array(mut b)) = b.pop() {
+                        if let Some(redis::Value::Array(mut b)) = b.pop() {
                             let span = tracing::Span::current();
                             if let Some(m) = b.pop() {
                                 let mut headers: HashMap<String, Vec<u8>> =
@@ -436,7 +436,7 @@ impl RedisStreamR {
                                 }
                                 self.inner.fail.store(0, Ordering::Relaxed);
                             }
-                            if let Some(redis::Value::Data(id)) = b.pop() {
+                            if let Some(redis::Value::BulkString(id)) = b.pop() {
                                 msg_id = String::from_utf8_lossy(&id).to_string();
                                 self.set_order_str(&msg_id);
                                 span.record("msg_id", &msg_id);
