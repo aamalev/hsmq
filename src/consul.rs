@@ -36,7 +36,7 @@ impl Consul {
         if let Some(ref check) = cfg.check {
             let mut checker = AgentServiceCheckBuilder::default();
             if let Some(grpc) = check.grpc.resolve() {
-                checker.grpc(String::from(grpc.clone()));
+                checker.grpc(grpc.clone());
             } else {
                 checker.http(String::from(check.http.clone()));
             }
