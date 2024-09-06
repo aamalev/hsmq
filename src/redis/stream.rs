@@ -1096,9 +1096,10 @@ mod tests {
 
     #[tokio::test]
     async fn stream_order() {
-        let mut streams = vec![];
-        streams.push(RedisStream::new_test("2"));
-        streams.push(RedisStream::new_test("1"));
+        let mut streams = [
+            RedisStream::new_test("2"),
+            RedisStream::new_test("1"),
+        ];
         streams.sort();
 
         let orders: Vec<_> = streams.iter().map(|x| x.order_id.as_str()).collect();

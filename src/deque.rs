@@ -19,6 +19,10 @@ impl<T> Deque<T> {
         self.metric.get() as usize
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.metric.get() == 0.0
+    }
+
     pub async fn push_front(&self, value: T) {
         self.metric.inc();
         let mut d = self.v.lock().await;
