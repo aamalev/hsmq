@@ -184,6 +184,7 @@ pub trait Queue: Debug {
     fn generic_clone(&self) -> GenericQueue;
     async fn subscribe(&self, consumer: GenericConsumer)
         -> Result<GenericSubscriber, GenericError>;
+    async fn ack(&self, id: String, shard: String, consumer_id: Uuid) -> Result<(), GenericError>;
     async fn publish(&self, msg: Arc<Envelop>) -> Result<(), PublishMessageError>;
 }
 
@@ -274,6 +275,13 @@ impl Queue for InMemoryQueue {
         let cmd = QueueCommand::ConsumeStart(consumer);
         result.send(cmd).await?;
         Ok(Box::new(result))
+    }
+
+    async fn ack(&self, id: String, shard: String, consumer_id: Uuid) -> Result<(), GenericError> {
+        Ok(self
+            .tx
+            .send(QueueCommand::MsgAck(id, shard, consumer_id))
+            .await?)
     }
 }
 
