@@ -444,6 +444,7 @@ impl hsmq_server::Hsmq for HsmqServer {
 
 struct GrpcStreaming {
     consumer_id: Uuid,
+    consumer_str: String,
     in_stream: Streaming<pb::Request>,
     out_tx: mpsc::Sender<Result<pb::Response, Status>>,
     subscriptions: BTreeMap<String, Subscription>,
@@ -453,6 +454,8 @@ struct GrpcStreaming {
     server_rx: mpsc::UnboundedReceiver<server::Response>,
     m_publish_ok: GenericCounter<AtomicF64>,
     m_publish_err: GenericCounter<AtomicF64>,
+    m_ack_ok: GenericCounter<AtomicF64>,
+    m_ack_err: GenericCounter<AtomicF64>,
 }
 
 impl GrpcStreaming {
@@ -470,8 +473,11 @@ impl GrpcStreaming {
 
         let m_publish_ok = GRPC_COUNTER.with_label_values(&["publish", "ok"]);
         let m_publish_err = GRPC_COUNTER.with_label_values(&["publish", "error"]);
+        let m_ack_ok = GRPC_COUNTER.with_label_values(&["ack", "ok"]);
+        let m_ack_err = GRPC_COUNTER.with_label_values(&["ack", "err"]);
 
         let s = Self {
+            consumer_str: consumer_id.to_string(),
             consumer_id,
             out_tx,
             in_stream,
@@ -482,6 +488,8 @@ impl GrpcStreaming {
             server_rx,
             m_publish_ok,
             m_publish_err,
+            m_ack_ok,
+            m_ack_err,
         };
 
         tokio::spawn(s.run_loop());
@@ -618,13 +626,30 @@ impl GrpcStreaming {
             ) => {
                 if let Some(subscriber) = self.subs.get_mut(queue) {
                     if let Err(e) = subscriber.ack(id.clone(), shard.clone()).await {
-                        tracing::error!(error = e, "Unexpected queue error");
+                        tracing::error!(
+                            error = e,
+                            consumer.id = self.consumer_str,
+                            "Unexpected queue error",
+                        );
                     };
+                    self.m_ack_ok.inc();
+                } else if let Some(q) = self.queues.get(queue) {
+                    if let Err(e) = q.ack(id.clone(), shard.clone(), self.consumer_id).await {
+                        tracing::error!(
+                            error = e,
+                            consumer.id = self.consumer_str,
+                            "Unexpected queue error",
+                        );
+                    };
+                    self.m_ack_ok.inc();
+                } else {
+                    self.m_ack_err.inc();
                 }
                 let kind = Some(pb::response::Kind::MessageAck(ack.clone()));
                 if let Err(e) = self.out_tx.send(Ok(pb::Response { kind })).await {
                     tracing::debug!(
                         error = &e as &dyn std::error::Error,
+                        consumer.id = self.consumer_str,
                         "Error send MessageAck",
                     );
                 }
