@@ -477,18 +477,19 @@ impl RedisStreamR {
 
     #[tracing::instrument(
         name = "stream.ack",
-        fields(msg_id = id, stream = &self.inner.name),
+        fields(stream = &self.inner.name),
         skip_all,
         level = "trace",
     )]
-    async fn ack(&mut self, stream: String, id: String) -> Result<bool, redis::RedisError> {
+    async fn ack(&mut self, stream: &str, ids: &[String]) -> Result<u32, redis::RedisError> {
         let cmd = redis::cmd("XACK")
-            .arg(&stream)
+            .arg(stream)
             .arg(&self.inner.group)
-            .arg(&id)
+            .arg(ids)
             .to_owned();
-        self.inner.m_xack.inc();
-        self.execute(cmd).await
+        let result = self.execute(cmd.clone()).await?;
+        self.inner.m_xack.inc_by(result as f64);
+        Ok(result)
     }
 }
 
@@ -596,14 +597,13 @@ struct Subscriber {
     prefetch_count: usize,
     tx_fetch: mpsc::Sender<(tracing::Span, Option<SystemTime>)>,
     task_fetch: JoinHandle<()>,
-    tx_ack: mpsc::Sender<(String, String)>,
-    task_ack: JoinHandle<()>,
+    tx_ack: mpsc::Sender<Option<(String, String)>>,
 }
 
 impl Drop for Subscriber {
     fn drop(&mut self) {
+        let _ = self.tx_ack.try_send(None);
         self.task_fetch.abort();
-        self.task_ack.abort();
     }
 }
 
@@ -626,7 +626,7 @@ impl Subscriber {
             }
         });
         let (tx_ack, rx_ack) = mpsc::channel(99);
-        let task_ack = tokio::spawn(async move {
+        tokio::spawn(async move {
             if let Err(e) = Self::ack(streams, rx_ack, task_tracker).await {
                 tracing::error!(
                     error = e,
@@ -641,7 +641,6 @@ impl Subscriber {
             tx_fetch,
             task_fetch,
             tx_ack,
-            task_ack,
         }
     }
     async fn consume(
@@ -666,7 +665,7 @@ impl Subscriber {
     }
     async fn ack(
         streams: HashMap<String, RedisStreamR>,
-        mut rx: mpsc::Receiver<(String, String)>,
+        mut rx: mpsc::Receiver<Option<(String, String)>>,
         task_tracker: TaskTracker,
     ) -> Result<(), GenericError> {
         let mut tasks = JoinSet::new();
@@ -678,13 +677,18 @@ impl Subscriber {
                 });
             }
             let item = tokio::select! {
-                Some((shard, id)) = rx.recv() => {
-                    tracing::debug!(
-                        message.id = &id,
-                        message.stream = &shard,
-                        "Received ack",
-                    );
-                    Some((shard, id))
+                Some(x) = rx.recv() => {
+                    match x {
+                        Some((shard, id)) => {
+                            tracing::debug!(
+                                message.id = &id,
+                                message.stream = &shard,
+                                "Received ack",
+                            );
+                            Some((shard, id))
+                        }
+                        None => break,
+                    }
                 }
                 Some(res) = tasks.join_next() => {
                     match res {
@@ -704,7 +708,8 @@ impl Subscriber {
                 if let Some(stream) = streams.get(&shard) {
                     let mut stream = stream.clone();
                     tasks.spawn(async move {
-                        while let Err(e) = stream.ack(shard.clone(), id.clone()).await {
+                        let ids = [id];
+                        while let Err(e) = stream.ack(&shard, &ids).await {
                             tracing::error!(error = &e as &dyn std::error::Error, "Error ack",);
                         }
                         false
@@ -712,6 +717,7 @@ impl Subscriber {
                 }
             }
         }
+        tasks.join_all().await;
         Ok(())
     }
 }
@@ -731,7 +737,7 @@ impl server::Subscriber for Subscriber {
 
     #[tracing::instrument(name = "subscriber.ack", skip_all, level = "trace")]
     async fn ack(&mut self, id: String, shard: String) -> Result<(), GenericError> {
-        self.tx_ack.send((shard, id)).await?;
+        self.tx_ack.send(Some((shard, id))).await?;
         if self.prefetch_count > 0 {
             let root = tracing::trace_span!(parent: None, "subscriber.fetch");
             self.tx_fetch.send((root, None)).await?;
@@ -763,6 +769,7 @@ pub struct RedisStreamQueue {
     pub name: String,
     tx_pub: mpsc::Sender<Arc<Envelop>>,
     tx_fetch: mpsc::Sender<FetchCommand>,
+    tx_ack: mpsc::Sender<(String, String)>,
     messages: Arc<Deque<Arc<Envelop>>>,
     streams: Vec<RedisStreamR>,
     consumer_id: String,
@@ -800,6 +807,15 @@ impl server::Queue for RedisStreamQueue {
     ) -> Result<GenericSubscriber, GenericError> {
         let subscriber = Subscriber::new(self, consumer, self.task_tracker.clone());
         Ok(Box::new(subscriber))
+    }
+
+    async fn ack(
+        &self,
+        id: String,
+        shard: String,
+        _consumer_id: uuid::Uuid,
+    ) -> Result<(), GenericError> {
+        Ok(self.tx_ack.send((id, shard)).await?)
     }
 }
 
@@ -845,10 +861,23 @@ impl RedisStreamQueue {
             hostname.clone(),
             messages.clone(),
         ));
+
+        let mstreams = streams
+            .iter()
+            .map(|s| (s.inner.name.clone(), s.clone()))
+            .collect();
+        let (tx_ack, rx_ack) = mpsc::channel(99);
+        let task_tracker_ack = task_tracker.clone();
+        task_tracker.spawn(async move {
+            if let Err(e) = Self::acker(mstreams, rx_ack, task_tracker_ack).await {
+                tracing::error!(error = e, "Subscriber ack disabled");
+            }
+        });
         Self {
             name,
             tx_pub,
             tx_fetch,
+            tx_ack,
             streams,
             messages,
             consumer_id: hostname,
@@ -1054,6 +1083,69 @@ impl RedisStreamQueue {
             }
         }
     }
+
+    async fn acker(
+        mut streams: HashMap<String, RedisStreamR>,
+        mut rx: mpsc::Receiver<(String, String)>,
+        task_tracker: TaskTracker,
+    ) -> Result<(), GenericError> {
+        let mut tasks: JoinSet<Option<(String, RedisStreamR)>> = JoinSet::new();
+        let mut ids = HashMap::new();
+        loop {
+            if tasks.is_empty() {
+                tasks.spawn(async {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    None // check shutdown
+                });
+            }
+            tokio::select! {
+                Some((id, shard)) = rx.recv() => {
+                    tracing::debug!(
+                        message.id = &id,
+                        message.stream = &shard,
+                        "Received ack",
+                    );
+                    ids.entry(shard).or_insert_with(Vec::new).push(id);
+
+                    while let Ok((id, shard)) = rx.try_recv() {
+                        let v = ids.entry(shard).or_insert_with(Vec::new);
+                        v.push(id);
+                        if v.len() > 10 {
+                            break;
+                        }
+                    }
+                }
+                Some(res) = tasks.join_next() => {
+                    match res {
+                        Ok(None) => {
+                            if task_tracker.is_closed() && rx.is_empty() {
+                                rx.close();
+                                break;
+                            }
+                        }
+                        Ok(Some((name, stream))) => {streams.insert(name, stream);}
+                        Err(e) => tracing::error!("Error in task queue {}", e),
+                    };
+                }
+            };
+            for (shard, shard_ids) in ids.iter_mut() {
+                if !shard_ids.is_empty() && streams.contains_key(shard) {
+                    if let Some(mut stream) = streams.remove(shard) {
+                        let mut ids = vec![];
+                        ids.append(shard_ids);
+                        let name = shard.clone();
+                        tasks.spawn(async move {
+                            while let Err(e) = stream.ack(&name, &ids).await {
+                                tracing::error!(error = &e as &dyn std::error::Error, "Error ack",);
+                            }
+                            Some((name, stream))
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1096,10 +1188,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_order() {
-        let mut streams = [
-            RedisStream::new_test("2"),
-            RedisStream::new_test("1"),
-        ];
+        let mut streams = [RedisStream::new_test("2"), RedisStream::new_test("1")];
         streams.sort();
 
         let orders: Vec<_> = streams.iter().map(|x| x.order_id.as_str()).collect();
