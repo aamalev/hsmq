@@ -22,7 +22,7 @@ jsonwebtoken = "9.3.0"
 lazy_static = "1.4.0"
 log = "0.4.21"
 opentelemetry = "0.24.0"
-opentelemetry_sdk = { version = "0.24.1", features = ["rt-tokio"] }
+opentelemetry_sdk = { version = "0.25.0", features = ["rt-tokio"] }
 prometheus = { version = "0.13.3", features = ["process"] }
 prost = "0.13.2"
 prost-types = "0.13.2"
