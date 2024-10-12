@@ -219,6 +219,11 @@ pub struct InMemoryQueue {
 #[serde(untagged)]
 pub enum Stream {
     String(String),
+    Params {
+        name: String,
+        #[serde(default)]
+        readonly: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]

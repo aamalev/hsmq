@@ -83,6 +83,7 @@ struct RedisStreamInner {
     name: String,
     group: String,
     fail: AtomicU64,
+    readonly: bool,
     m_xadd: GenericCounter<AtomicF64>,
     m_xread: GenericCounter<AtomicF64>,
     m_xread_nil: GenericCounter<AtomicF64>,
@@ -91,7 +92,7 @@ struct RedisStreamInner {
 }
 
 impl RedisStreamInner {
-    fn new(cfg: RedisStreamConfig, name: String, group: String) -> Self {
+    fn new(cfg: RedisStreamConfig, name: String, group: String, readonly: bool) -> Self {
         let m_xadd = metrics::REDIS_COUNTER.with_label_values(&[&name, "XADD"]);
         let m_xread = metrics::REDIS_COUNTER.with_label_values(&[&name, "XREADGROUP"]);
         let m_xread_nil = metrics::REDIS_COUNTER.with_label_values(&[&name, "XREADGROUP-NIL"]);
@@ -102,6 +103,7 @@ impl RedisStreamInner {
             name,
             group,
             fail: Default::default(),
+            readonly,
             m_xadd,
             m_xread,
             m_xread_nil,
@@ -218,6 +220,7 @@ impl RedisStreamR {
         connection: crate::redis::RedisConnection,
         cfg: RedisStreamConfig,
         name: String,
+        readonly: bool,
     ) -> Self {
         let queue = name.clone();
         let group = match cfg.group {
@@ -258,7 +261,7 @@ impl RedisStreamR {
         Self {
             order_id: Default::default(),
             connection,
-            inner: Arc::new(RedisStreamInner::new(cfg, name, group)),
+            inner: Arc::new(RedisStreamInner::new(cfg, name, group, readonly)),
         }
     }
 
@@ -829,7 +832,12 @@ impl RedisStreamQueue {
             .streams
             .iter()
             .map(|stream_cfg| match stream_cfg {
-                Stream::String(s) => RedisStream::new(connection.clone(), cfg.clone(), s.clone()),
+                Stream::String(name) => {
+                    RedisStream::new(connection.clone(), cfg.clone(), name.clone(), false)
+                }
+                Stream::Params { name, readonly } => {
+                    RedisStream::new(connection.clone(), cfg.clone(), name.clone(), *readonly)
+                }
             })
             .collect();
         let (tx_pub, rx) = mpsc::channel(99);
@@ -839,7 +847,11 @@ impl RedisStreamQueue {
         task_tracker.spawn(Self::publishing(
             rx,
             task_tracker.clone(),
-            streams.iter().cloned().collect(),
+            streams
+                .iter()
+                .filter(|s| !s.inner.readonly)
+                .cloned()
+                .collect(),
             m_received,
             m_in_buffer,
         ));
@@ -1181,6 +1193,7 @@ mod tests {
                     RedisStreamConfig::default(),
                     String::default(),
                     String::default(),
+                    false,
                 )),
             }
         }
