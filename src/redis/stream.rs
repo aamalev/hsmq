@@ -911,6 +911,7 @@ impl RedisStreamQueue {
         let m_received = metrics::QUEUE_COUNTER.with_label_values(&[&name, "received"]);
         let m_in_buffer = metrics::QUEUE_GAUGE.with_label_values(&[&name, "in-buffer"]);
         task_tracker.spawn(Self::publishing(
+            cfg.name.clone(),
             rx,
             task_tracker.clone(),
             streams
@@ -920,6 +921,7 @@ impl RedisStreamQueue {
                 .collect(),
             m_received,
             m_in_buffer,
+            cfg.maxlen,
         ));
 
         let (tx_fetch, rx_fetch) = mpsc::channel(99);
@@ -975,12 +977,15 @@ impl RedisStreamQueue {
     }
 
     async fn publishing(
+        name: String,
         mut rx: mpsc::Receiver<Arc<Envelop>>,
         task_tracker: TaskTracker,
         mut writers: VecDeque<RedisStreamR>,
         m_received: GenericCounter<AtomicF64>,
         m_in_buffer: GenericGauge<AtomicF64>,
+        maxlen: Option<usize>,
     ) {
+        let m_drop_limit = metrics::QUEUE_COUNTER.with_label_values(&[&name, "drop-limit"]);
         let mut tasks = JoinSet::new();
         let mut messages = VecDeque::new();
         loop {
@@ -995,6 +1000,12 @@ impl RedisStreamQueue {
                     tracing::debug!("Received {} msg {:?}", messages.len(), &msg);
                     messages.push_back(msg);
                     m_in_buffer.inc();
+                    if let Some(maxlen) = maxlen {
+                        if messages.len() > maxlen {
+                            m_drop_limit.inc();
+                            messages.pop_front();
+                        }
+                    }
                 }
                 Some(res) = tasks.join_next() => {
                     match res {
