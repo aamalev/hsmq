@@ -33,8 +33,7 @@ use super::RedisConnection;
 
 const TYPE_URL_STRING: &str = "type.googleapis.com/google.protobuf.StringValue";
 
-#[allow(dead_code)]
-fn cmd_to_string(cmd: redis::Cmd) -> String {
+fn cmd_to_string(cmd: &redis::Cmd) -> String {
     let s = cmd.args_iter().map(|a| match a {
         redis::Arg::Simple(a) => String::from_utf8(a.to_vec()).unwrap_or_default(),
         _ => String::default(),
@@ -223,6 +222,13 @@ impl RedisStreamR {
         readonly: bool,
     ) -> Self {
         let queue = name.clone();
+        if let Some(ref ttl) = cfg.ttl_key {
+            tokio::spawn(Self::bumper_ttl(
+                connection.clone(),
+                name.clone(),
+                ttl.clone().into(),
+            ));
+        }
         let group = match cfg.group {
             RedisStreamGroupConfig::Name(ref name) => name.to_string(),
             RedisStreamGroupConfig::Group {
@@ -240,20 +246,15 @@ impl RedisStreamR {
                 if let Some(RedisStreamGroupCleanConfig { every, max_idle }) = clear {
                     let group = name.to_string();
                     let every = std::time::Duration::from(every.clone());
-                    let max_idle = std::time::Duration::from(max_idle.clone()).as_secs();
-                    let mut c = connection.clone();
-                    tokio::spawn(async move {
-                        let sleep_start = rand::thread_rng().gen_range(0..every.as_secs());
-                        tokio::time::sleep(std::time::Duration::from_secs(sleep_start)).await;
-                        loop {
-                            if let Err(e) =
-                                Self::clear_consumers(&mut c, &queue, &group, max_idle).await
-                            {
-                                tracing::error!("Clear consumers with error {:?}", e);
-                            }
-                            tokio::time::sleep(every).await;
-                        }
-                    });
+                    let max_idle = std::time::Duration::from(max_idle.clone());
+                    let connection = connection.clone();
+                    tokio::spawn(Self::cleaner_consumers(
+                        connection,
+                        queue.clone(),
+                        group,
+                        max_idle,
+                        every,
+                    ));
                 };
                 name.to_string()
             }
@@ -287,10 +288,16 @@ impl RedisStreamR {
             .arg("MKSTREAM")
             .to_owned();
         if let Err(e) = connection.req_packed_command(&cmd).await {
-            log::debug!("Init group {} for {} error {:?}", group, name, e);
+            tracing::debug!(
+                error = &e as &dyn std::error::Error,
+                group,
+                name,
+                "Init error",
+            );
         }
     }
 
+    #[tracing::instrument(name = "stream.consumers", skip(connection))]
     async fn get_consumers(
         connection: &mut RedisConnection,
         name: &String,
@@ -305,21 +312,26 @@ impl RedisStreamR {
         redis::FromRedisValue::from_redis_value(&result)
     }
 
+    #[tracing::instrument(name = "stream.clear", skip(connection))]
     async fn clear_consumers(
         connection: &mut RedisConnection,
         name: &String,
         group: &String,
-        max_idle: u64,
-    ) -> redis::RedisResult<()> {
+        max_idle: &std::time::Duration,
+        m_pending: &GenericGauge<AtomicF64>,
+    ) -> anyhow::Result<()> {
         let cmd = redis::cmd("XGROUP")
             .arg("DELCONSUMER")
             .arg(name)
             .arg(group)
             .to_owned();
 
+        let max_idle = max_idle.as_secs();
+
         let consumers = Self::get_consumers(connection, name, group).await?;
         let idles: Vec<_> = consumers
             .into_iter()
+            .inspect(|_| m_pending.inc())
             .filter(|rc| rc.idle > max_idle)
             .collect();
 
@@ -334,6 +346,60 @@ impl RedisStreamR {
             tracing::info!("[{}] Deleted {} idle consumers", name, idles.len());
         }
         Ok(())
+    }
+
+    #[tracing::instrument(name = "stream.cleaner", skip(connection))]
+    async fn cleaner_consumers(
+        mut connection: RedisConnection,
+        name: String,
+        group: String,
+        max_idle: std::time::Duration,
+        every: std::time::Duration,
+    ) {
+        let sleep_start = rand::thread_rng().gen_range(0.0..every.as_secs_f64());
+        tokio::time::sleep(std::time::Duration::from_secs_f64(sleep_start)).await;
+
+        let m_pending = metrics::REDIS_GAUGE.with_label_values(&[&name, "pending"]);
+
+        loop {
+            if let Err(e) =
+                Self::clear_consumers(&mut connection, &name, &group, &max_idle, &m_pending).await
+            {
+                tracing::error!(
+                    error = e.as_ref() as &dyn std::error::Error,
+                    "Clear consumers with error",
+                );
+            }
+            tokio::time::sleep(every).await;
+        }
+    }
+
+    #[tracing::instrument(name = "stream.expire", skip(connection))]
+    async fn bump_ttl(
+        connection: &mut RedisConnection,
+        name: &String,
+        ttl: &std::time::Duration,
+    ) -> anyhow::Result<()> {
+        let cmd = redis::cmd("EXPIRE").arg(name).arg(ttl.as_secs()).to_owned();
+        tracing::info!(cmd = cmd_to_string(&cmd), "Bump ttl");
+        connection.req_packed_command(&cmd).await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(name = "stream.bumper", skip(connection))]
+    async fn bumper_ttl(mut connection: RedisConnection, name: String, ttl: std::time::Duration) {
+        let sleep_start = rand::thread_rng().gen_range(0.0..9.0);
+        tokio::time::sleep(std::time::Duration::from_secs_f64(sleep_start)).await;
+        loop {
+            if let Err(e) = Self::bump_ttl(&mut connection, &name, &ttl).await {
+                tracing::error!(
+                    error = e.as_ref() as &dyn std::error::Error,
+                    stream = &name,
+                    "Error while bump ttl",
+                );
+            }
+            tokio::time::sleep(ttl / 2).await;
+        }
     }
 
     #[tracing::instrument(
@@ -1176,6 +1242,7 @@ mod tests {
                 limit: Default::default(),
                 group: RedisStreamGroupConfig::Name(Default::default()),
                 nomkstream: Default::default(),
+                ttl_key: Default::default(),
                 streams: Default::default(),
                 body_fieldname: RedisStreamConfig::default_body_fieldname(),
                 body_type_fieldname: RedisStreamConfig::default_body_type_fieldname(),

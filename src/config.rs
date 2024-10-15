@@ -273,6 +273,8 @@ pub struct RedisStreamConfig {
     #[serde(default)]
     pub nomkstream: bool,
     pub streams: Vec<Stream>,
+    #[serde(default)]
+    pub ttl_key: Option<Duration>,
     #[serde(default = "RedisStreamConfig::default_body_fieldname")]
     pub body_fieldname: String,
     #[serde(default = "RedisStreamConfig::default_body_type_fieldname")]

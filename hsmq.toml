@@ -56,6 +56,7 @@ topics = [
 type = "RedisStream"
 name = "redis-stream"
 connector = "redis-local"
+ttl_key.h = 3
 group.name = "redis-stream"
 group.init = true
 group.clear.every = { m = 1 }
