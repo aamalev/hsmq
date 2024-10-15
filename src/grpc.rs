@@ -316,7 +316,7 @@ impl hsmq_server::Hsmq for HsmqServer {
     #[tracing::instrument(name = "publish", skip_all, level = "debug")]
     async fn publish(&self, request: Request<Message>) -> HsmqResult<PublishResponse> {
         if self.task_tracker.is_closed() {
-            return Err(Status::failed_precondition("shutdown"));
+            return Err(Status::unavailable("shutdown"));
         }
         let message = request.into_inner();
         let topic = message.topic.clone();
@@ -345,7 +345,7 @@ impl hsmq_server::Hsmq for HsmqServer {
         let mut count = 0;
         while let Some(result) = in_stream.next().await {
             if self.task_tracker.is_closed() {
-                return Err(Status::failed_precondition("shutdown"));
+                return Err(Status::unavailable("shutdown"));
             };
             match result {
                 Ok(message) => {
@@ -428,7 +428,7 @@ impl hsmq_server::Hsmq for HsmqServer {
         if self.task_tracker.is_closed() {
             if let Some(p) = request.metadata().get("shutdown") {
                 if p.eq("reject") {
-                    return Err(Status::failed_precondition("shutdown"));
+                    return Err(Status::unavailable("shutdown"));
                 }
             }
         }
