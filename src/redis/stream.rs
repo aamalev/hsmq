@@ -312,7 +312,7 @@ impl RedisStreamR {
         redis::FromRedisValue::from_redis_value(&result)
     }
 
-    #[tracing::instrument(name = "stream.clear", skip(connection))]
+    #[tracing::instrument(name = "stream.clear", skip(connection, m_pending))]
     async fn clear_consumers(
         connection: &mut RedisConnection,
         name: &String,
