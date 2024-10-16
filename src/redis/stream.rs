@@ -3,7 +3,7 @@ use prometheus::core::{AtomicF64, GenericCounter, GenericGauge};
 use rand::Rng;
 use redis::{aio::ConnectionLike, RedisResult};
 use std::{
-    collections::{BinaryHeap, HashMap, VecDeque},
+    collections::{BTreeMap, BinaryHeap, HashMap, VecDeque},
     fmt::{Debug, Display},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -906,6 +906,25 @@ impl RedisStreamQueue {
                 }
             })
             .collect();
+
+        {
+            let queue = cfg.name.clone();
+            let connection = connection.clone();
+            let keys = streams.iter().map(|s| s.inner.name.clone()).collect();
+            tokio::spawn(async move {
+                if let Ok(m) = Self::get_keys_addresses(connection, keys).await {
+                    for (addr, keys) in m {
+                        tracing::info!(
+                            queue = queue,
+                            addr = addr,
+                            streams = keys.join(","),
+                            "Queue nodes",
+                        );
+                    }
+                }
+            });
+        }
+
         let (tx_pub, rx) = mpsc::channel(99);
         let name = cfg.name.clone();
         let m_received = metrics::QUEUE_COUNTER.with_label_values(&[&name, "received"]);
@@ -1234,6 +1253,82 @@ impl RedisStreamQueue {
             }
         }
         Ok(())
+    }
+
+    pub async fn get_cluster_slots(
+        connection: &mut RedisConnection,
+    ) -> anyhow::Result<BTreeMap<u16, String>> {
+        let result: Vec<Vec<redis::Value>> = redis::cmd("CLUSTER")
+            .arg("SLOTS")
+            .query_async(connection)
+            .await?;
+
+        let mut slot_map = BTreeMap::new();
+
+        for slot_info in result {
+            if slot_info.len() < 3 {
+                continue;
+            }
+
+            let start_slot: u16 = match slot_info[0] {
+                redis::Value::Int(i) => i as u16,
+                _ => continue,
+            };
+
+            let node_info = match &slot_info[2] {
+                redis::Value::Array(v) => v,
+                _ => continue,
+            };
+
+            if node_info.len() < 2 {
+                continue;
+            }
+
+            let ip = match &node_info[0] {
+                redis::Value::BulkString(d) => String::from_utf8_lossy(d),
+                _ => continue,
+            };
+
+            let port = match node_info[1] {
+                redis::Value::Int(p) => p,
+                _ => continue,
+            };
+
+            let node_address = format!("{}:{}", ip, port);
+
+            slot_map.insert(start_slot, node_address);
+        }
+
+        Ok(slot_map)
+    }
+
+    pub async fn get_keys_addresses(
+        mut connection: RedisConnection,
+        keys: Vec<String>,
+    ) -> anyhow::Result<HashMap<String, Vec<String>>> {
+        let slot_map = Self::get_cluster_slots(&mut connection).await?;
+
+        let mut key_addresses = HashMap::new();
+
+        let mut pipeline = redis::pipe();
+        for key in keys.iter() {
+            pipeline.cmd("CLUSTER").arg("KEYSLOT").arg(key);
+        }
+        let key_slots: Vec<u16> = pipeline.query_async(&mut connection).await?;
+
+        for (key, slot) in keys.iter().zip(key_slots.iter()) {
+            let address = slot_map
+                .range(..=slot)
+                .next_back()
+                .map(|(_, addr)| addr.clone())
+                .unwrap_or_else(|| "Unknown".to_string());
+            key_addresses
+                .entry(address)
+                .or_insert_with(Vec::new)
+                .push(key.clone());
+        }
+
+        Ok(key_addresses)
     }
 }
 
