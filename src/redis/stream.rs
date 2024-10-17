@@ -1032,7 +1032,7 @@ impl RedisStreamQueue {
                 Some(res) = tasks.join_next() => {
                     match res {
                         Ok(PublishResult::GracefulShutdown) => {
-                            if task_tracker.is_closed() && rx.is_empty() {
+                            if task_tracker.is_closed() && tasks.is_empty() && rx.is_empty() {
                                 rx.close();
                                 break;
                             }
