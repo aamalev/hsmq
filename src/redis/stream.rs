@@ -46,7 +46,7 @@ fn cmd_to_string(cmd: &redis::Cmd) -> String {
 #[derive(Default, Debug)]
 struct RedisConsumer {
     name: String,
-    pending: u64,
+    pending: f64,
     idle: u64,
     inactive: Option<u64>,
 }
@@ -329,11 +329,13 @@ impl RedisStreamR {
         let max_idle = max_idle.as_secs();
 
         let consumers = Self::get_consumers(connection, name, group).await?;
+        let mut pending = 0.0;
         let idles: Vec<_> = consumers
             .into_iter()
-            .inspect(|_| m_pending.inc())
+            .inspect(|c| pending += c.pending)
             .filter(|rc| rc.idle > max_idle)
             .collect();
+        m_pending.set(pending);
 
         for rc in idles.iter() {
             tracing::trace!("Delete idle consumer {:?}", rc);
