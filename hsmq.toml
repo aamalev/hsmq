@@ -15,6 +15,7 @@ secrets = [
 
 [tracing]
 level = "INFO"
+with_ansi = true  # enable colors
 
 # [sentry]
 # dsn = ""

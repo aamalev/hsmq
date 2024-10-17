@@ -12,6 +12,12 @@ pub fn init_subscriber(cfg: &config::Config) -> anyhow::Result<()> {
         .unwrap_or("INFO".to_string());
     let level = tracing::Level::from_str(&level)?;
 
+    let ansi = cfg
+        .tracing
+        .clone()
+        .and_then(|f| f.with_ansi)
+        .unwrap_or(true);
+
     let registry = tracing_subscriber::registry();
 
     #[cfg(feature = "console")]
@@ -19,6 +25,7 @@ pub fn init_subscriber(cfg: &config::Config) -> anyhow::Result<()> {
 
     let registry = registry.with(
         tracing_subscriber::fmt::layer()
+            .with_ansi(ansi)
             .with_filter(filter::Targets::new().with_target("hsmq", level)),
     );
 
