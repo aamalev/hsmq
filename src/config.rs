@@ -73,6 +73,8 @@ impl Default for Prometheus {
 pub struct Tracing {
     #[serde(default)]
     pub level: Option<String>,
+    #[serde(default)]
+    pub with_ansi: Option<bool>,
 }
 
 #[cfg(feature = "consul")]
