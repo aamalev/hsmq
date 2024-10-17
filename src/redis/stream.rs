@@ -1018,12 +1018,15 @@ impl RedisStreamQueue {
                 Some(msg) = rx.recv() => {
                     tracing::debug!("Received {} msg {:?}", messages.len(), &msg);
                     messages.push_back(msg);
-                    m_in_buffer.inc();
                     if let Some(maxlen) = maxlen {
                         if messages.len() > maxlen {
                             m_drop_limit.inc();
                             messages.pop_front();
+                        } else {
+                            m_in_buffer.inc();
                         }
+                    } else {
+                        m_in_buffer.inc();
                     }
                 }
                 Some(res) = tasks.join_next() => {
