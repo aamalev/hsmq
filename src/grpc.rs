@@ -10,6 +10,7 @@ use crate::server::{
     Subscription,
 };
 
+use anyhow::Context;
 use prometheus::core::{AtomicF64, GenericCounter, GenericGauge};
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
@@ -433,6 +434,12 @@ impl hsmq_server::Hsmq for HsmqServer {
             }
         }
 
+        let redirect = request
+            .metadata()
+            .get("redirect")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
         let (response_tx, response_rx) = mpsc::channel::<Result<pb::Response, Status>>(1);
         let in_stream = request.into_inner();
 
@@ -441,6 +448,8 @@ impl hsmq_server::Hsmq for HsmqServer {
             response_tx,
             self.queues.clone(),
             self.subscriptions.clone(),
+            self.task_tracker.clone(),
+            redirect,
         );
 
         let output_stream = ReceiverStream::new(response_rx);
@@ -464,6 +473,8 @@ struct GrpcStreaming {
     m_publish_err: GenericCounter<AtomicF64>,
     m_ack_ok: GenericCounter<AtomicF64>,
     m_ack_err: GenericCounter<AtomicF64>,
+    task_tracker: TaskTracker,
+    redirect: Option<String>,
 }
 
 impl GrpcStreaming {
@@ -472,6 +483,8 @@ impl GrpcStreaming {
         out_tx: mpsc::Sender<Result<pb::Response, Status>>,
         queues: HashMap<String, server::GenericQueue>,
         subscriptions: BTreeMap<String, Subscription>,
+        task_tracker: TaskTracker,
+        redirect: Option<String>,
     ) {
         let (server_tx, server_rx) = mpsc::unbounded_channel::<server::Response>();
 
@@ -498,6 +511,8 @@ impl GrpcStreaming {
             m_publish_err,
             m_ack_ok,
             m_ack_err,
+            redirect,
+            task_tracker,
         };
 
         tokio::spawn(s.run_loop());
@@ -564,6 +579,17 @@ impl GrpcStreaming {
         }
     }
 
+    async fn send_redirect(&mut self) -> anyhow::Result<()> {
+        if let Some(grpc_uri) = self.redirect.take() {
+            let kind = Some(pb::response::Kind::Redirect(pb::Redirect { grpc_uri }));
+            self.out_tx
+                .send(Ok(pb::Response { kind }))
+                .await
+                .context("Error send Redirect")?;
+        }
+        Ok(())
+    }
+
     async fn req_kind(&mut self, kind: pb::request::Kind) -> anyhow::Result<()> {
         match kind {
             pb::request::Kind::PublishMessage(pb::PublishMessage {
@@ -571,6 +597,9 @@ impl GrpcStreaming {
                 qos,
                 request_id,
             }) => {
+                if self.task_tracker.is_closed() {
+                    self.send_redirect().await?;
+                }
                 let span = tracing::trace_span!("publish");
                 let _ = span.enter();
                 let topic = message.topic.clone();
@@ -668,6 +697,9 @@ impl GrpcStreaming {
                 timeout,
                 autoack,
             }) => {
+                if self.task_tracker.is_closed() {
+                    self.send_redirect().await?;
+                }
                 let deadline = SystemTime::now() + Duration::from_secs_f32(timeout);
                 let fetch_result = if let Some(subscriber) = self.subs.get_mut(&queue) {
                     subscriber.fetch(deadline).await.map_err(|e| {
