@@ -350,7 +350,6 @@ impl RedisStreamR {
         Ok(())
     }
 
-    #[tracing::instrument(name = "stream.cleaner", skip(connection))]
     async fn cleaner_consumers(
         mut connection: RedisConnection,
         name: String,
@@ -388,7 +387,6 @@ impl RedisStreamR {
         Ok(())
     }
 
-    #[tracing::instrument(name = "stream.bumper", skip(connection))]
     async fn bumper_ttl(mut connection: RedisConnection, name: String, ttl: std::time::Duration) {
         let sleep_start = rand::thread_rng().gen_range(0.0..9.0);
         tokio::time::sleep(std::time::Duration::from_secs_f64(sleep_start)).await;
