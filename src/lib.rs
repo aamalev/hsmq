@@ -4,6 +4,7 @@ pub mod pb {
 pub mod auth;
 pub mod cluster;
 pub mod config;
+pub mod deque;
 pub mod errors;
 pub mod grpc;
 pub mod jwt;
@@ -15,6 +16,9 @@ pub mod web;
 
 #[cfg(feature = "consul")]
 pub mod consul;
+
+#[cfg(feature = "redis")]
+pub mod redis;
 
 pub mod client_factory;
 pub mod launcher;
