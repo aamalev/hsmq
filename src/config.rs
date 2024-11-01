@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct Client {
@@ -355,10 +355,15 @@ impl Config {
 #[serde(untagged)]
 pub enum ResolvableValue {
     Value(String),
-    Env {
+    Resolvable {
         #[serde(default)]
         name: Option<String>,
-        env: String,
+        #[serde(default)]
+        env: Option<String>,
+        #[serde(default)]
+        file: Option<PathBuf>,
+        #[serde(default)]
+        json_field: Option<String>,
         #[serde(default)]
         default: Option<String>,
         #[serde(default)]
@@ -369,37 +374,107 @@ pub enum ResolvableValue {
 impl ResolvableValue {
     pub fn get_name(&self) -> Option<String> {
         match self {
-            ResolvableValue::Env { name, .. } => name.clone(),
+            ResolvableValue::Resolvable { name, .. } => name.clone(),
             _ => None,
         }
+    }
+
+    fn read_file(path: PathBuf) -> anyhow::Result<String> {
+        let mut f = File::open(path)?;
+        let mut v = vec![];
+        f.read_to_end(&mut v)?;
+        let s = String::from_utf8_lossy(&v);
+        Ok(s.to_string())
     }
 
     pub fn resolve(&self) -> Option<String> {
         match self {
             ResolvableValue::Value(val) => Some(val.to_string()),
-            ResolvableValue::Env {
+            ResolvableValue::Resolvable {
                 name,
                 env,
+                file,
                 default,
+                json_field,
                 disable,
             } => {
                 if *disable {
                     return None;
                 }
-                match std::env::var(env) {
-                    Ok(result) => Some(result),
-                    Err(_) => {
-                        if let Some(default) = default {
-                            Some(default.clone())
-                        } else {
-                            match name {
-                                Some(name) => log::error!("Expect value in {} for {}", env, name),
-                                _ => log::info!("Expect value in {}", env),
-                            };
-                            None
-                        }
-                    }
+                let mut result = env
+                    .clone()
+                    .and_then(|env| {
+                        std::env::var(env.clone())
+                            .inspect_err(|_| {
+                                if default.is_none() {
+                                    tracing::error!(name = name, "Expect value in env {}", env,);
+                                };
+                            })
+                            .ok()
+                    })
+                    .or_else(|| {
+                        file.clone().and_then(|f| {
+                            Self::read_file(f.clone())
+                                .inspect_err(|_| {
+                                    if default.is_none() {
+                                        tracing::error!(
+                                            name = name,
+                                            "Expect value in file {:?}",
+                                            f
+                                        );
+                                    };
+                                })
+                                .ok()
+                        })
+                    });
+                if let Some(field) = json_field {
+                    result = result
+                        .and_then(|r| {
+                            serde_json::from_str(&r)
+                                .inspect_err(|e| {
+                                    tracing::error!(
+                                        error = e as &dyn std::error::Error,
+                                        name = name,
+                                        "Error decode json",
+                                    )
+                                })
+                                .ok()
+                        })
+                        .and_then(|r| match r {
+                            serde_json::Value::Object(m) => {
+                                if let Some(v) = m.get(field) {
+                                    match v {
+                                        serde_json::Value::String(s) => Some(s.to_string()),
+                                        serde_json::Value::Number(n) => Some(n.to_string()),
+                                        _ => {
+                                            tracing::error!(
+                                                name = name,
+                                                json.field = field,
+                                                "Not string in json field",
+                                            );
+                                            None
+                                        }
+                                    }
+                                } else {
+                                    tracing::error!(
+                                        name = name,
+                                        json.field = field,
+                                        "Not found field in json",
+                                    );
+                                    None
+                                }
+                            }
+                            _ => {
+                                tracing::error!(
+                                    name = name,
+                                    json.field = field,
+                                    "Not object in json",
+                                );
+                                None
+                            }
+                        });
                 }
+                result.filter(|s| !s.is_empty()).or(default.clone())
             }
         }
     }
@@ -419,9 +494,11 @@ mod tests {
     async fn resolve_env_empty() {
         const ENV: &str = "resolve_env_empty";
         std::env::remove_var(ENV);
-        let v = ResolvableValue::Env {
-            env: ENV.into(),
+        let v = ResolvableValue::Resolvable {
+            env: Some(ENV.to_string()),
+            file: None,
             name: None,
+            json_field: None,
             default: None,
             disable: false,
         };
@@ -431,16 +508,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_env_empty_default() {
+        const ENV: &str = "resolve_env_empty_default";
+        std::env::remove_var(ENV);
+        let v = ResolvableValue::Resolvable {
+            env: Some(ENV.to_string()),
+            file: None,
+            name: None,
+            json_field: None,
+            default: Some("default".to_string()),
+            disable: false,
+        };
+        let result = v.resolve();
+        tracing::info!("Result {:?}", result);
+        assert_eq!(result, Some("default".to_string()));
+    }
+
+    #[tokio::test]
     async fn resolve_env_exist_empty() {
         const ENV: &str = "resolve_env_exist_empty";
         std::env::set_var(ENV, "");
-        let v = ResolvableValue::Env {
-            env: ENV.into(),
+        let v = ResolvableValue::Resolvable {
+            env: Some(ENV.to_string()),
+            file: None,
             name: None,
+            json_field: None,
             default: None,
             disable: false,
         };
         let result = v.resolve();
-        assert!(result.is_some());
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_env_json() {
+        const ENV: &str = "resolve_env_json";
+        std::env::set_var(ENV, "{\"W\": 123}");
+        let v = ResolvableValue::Resolvable {
+            env: Some(ENV.to_string()),
+            file: None,
+            name: None,
+            json_field: Some("W".to_string()),
+            default: None,
+            disable: false,
+        };
+        let result = v.resolve();
+        assert_eq!(result, Some("123".to_string()));
     }
 }
