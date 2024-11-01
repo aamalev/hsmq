@@ -11,6 +11,8 @@ grpc_address = "0.0.0.0:4848"  # IPv4
 secrets = [
     # "inline secret",
     { env = "JWT_SECRET" }, # secret from environment variable
+    { file = "secrets.txt" }, # secret from file
+    { file = "secrets.json", json_field = "jwt" }, # secret from json
 ]
 
 [tracing]
