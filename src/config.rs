@@ -395,6 +395,16 @@ impl Config {
                 }
             }
         }
+
+        for r in self.redis.values_mut() {
+            if let Some(ref mut u) = r.username {
+                resolver.resolve(u).await?;
+            }
+            if let Some(ref mut p) = r.password {
+                resolver.resolve(p).await?;
+            }
+        }
+
         Ok(())
     }
 }
