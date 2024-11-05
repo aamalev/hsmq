@@ -16,6 +16,7 @@ Horizontal Scalable Message Queue Broker
 - [x] Prometheus metrics
 - [x] Consul
 - [x] Sentry
+- [x] Vault
 - [x] Declare queue params
 - [x] Console client hsmq-cli
     - [x] Publish
@@ -109,3 +110,26 @@ tokens = [
 You must specify a header in each request:
 
     authorization: Bearer {token}
+
+
+### Vault
+
+For enable vault add to config block [vault]
+
+```toml
+[vault]
+```
+
+```toml
+[vault]  # enable vault
+uri = "http://localhost:8200"  # optional
+auth.jwt.env = "VAULT_JWT_TOKEN"  # optional
+token = { env = "VAULT_TOKEN", file = "/etc/vault-token.json", json_field = "jwt" }  # optional
+ca_cert = "/etc/ca.pem"  # optional
+
+[auth.jwt]
+secrets = [
+    { vault_path = "project/hsmq/jwt_1", json_field = "token", vault_mount = "secret" },  # field from json from kv2
+    { vault_path = "project/hsmq/jwt_2", vault_kv_version = 1, json_field = "token" },  # token from kv1
+]
+```

@@ -24,8 +24,19 @@ async fn ctrl_c(graceful: bool) {
     }
 }
 
-pub async fn run(cfg: Config, listener: Option<TcpListener>) -> Result<(), GenericError> {
+#[allow(unused_mut)]
+pub async fn run(mut cfg: Config, listener: Option<TcpListener>) -> Result<(), GenericError> {
     crate::tracing::init_subscriber(&cfg)?;
+
+    #[cfg(feature = "vault")]
+    if let Some(ref cfgv) = cfg.vault {
+        let mut v = crate::vault::Client::new(cfgv.clone())?;
+        v.login().await?;
+        while let Err(e) = cfg.resolve(&v).await {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tracing::warn!(error = e.as_ref() as &dyn std::error::Error, "Retry vault");
+        }
+    }
 
     let hostname = gethostname::gethostname().to_string_lossy().to_string();
 

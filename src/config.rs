@@ -139,6 +139,26 @@ impl From<Sentry> for sentry::ClientOptions {
     }
 }
 
+#[cfg(feature = "vault")]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(untagged)]
+pub enum VaultAuth {
+    JWT {
+        jwt: ResolvableValue,
+        role: Option<String>,
+    },
+}
+
+#[cfg(feature = "vault")]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct Vault {
+    pub uri: Option<String>,
+    pub auth: Option<VaultAuth>,
+    pub token: Option<ResolvableValue>,
+    pub ca_cert: Option<String>,
+    pub verify: Option<bool>,
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct Cluster {
     pub name: String,
@@ -311,6 +331,8 @@ pub struct Config {
     #[cfg(feature = "sentry")]
     #[serde(default)]
     pub sentry: Sentry,
+    #[cfg(feature = "vault")]
+    pub vault: Option<Vault>,
     #[cfg(feature = "consul")]
     pub consul: Option<Consul>,
     #[serde(default)]
@@ -349,6 +371,37 @@ impl Config {
     pub fn cluster_name(&self) -> Option<String> {
         self.cluster.as_ref().map(|c| c.name.clone())
     }
+
+    pub async fn resolve<'a, R>(&mut self, resolver: &R) -> anyhow::Result<()>
+    where
+        R: Resolver + 'a,
+    {
+        if let Some(ref mut jwt) = self.auth.jwt {
+            for secret in jwt.secrets.iter_mut() {
+                resolver.resolve(secret).await?;
+            }
+        }
+
+        for u in self.users.values_mut() {
+            for t in u.tokens.iter_mut() {
+                resolver.resolve(t).await?;
+            }
+        }
+
+        if let Some(ref mut cluster) = self.cluster {
+            if let Some(ref mut jwt) = cluster.jwt {
+                for secret in jwt.secrets.iter_mut() {
+                    resolver.resolve(secret).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[tonic::async_trait]
+pub trait Resolver {
+    async fn resolve<'a>(&self, rv: &'a mut ResolvableValue) -> anyhow::Result<()>;
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -358,6 +411,8 @@ pub enum ResolvableValue {
     Resolvable {
         #[serde(default)]
         name: Option<String>,
+        #[serde(default, skip_serializing)]
+        value: Option<String>,
         #[serde(default)]
         env: Option<String>,
         #[serde(default)]
@@ -365,10 +420,33 @@ pub enum ResolvableValue {
         #[serde(default)]
         json_field: Option<String>,
         #[serde(default)]
+        vault_mount: Option<String>,
+        #[serde(default)]
+        vault_path: Option<String>,
+        #[serde(default)]
+        vault_kv_version: u8,
+        #[serde(default)]
         default: Option<String>,
         #[serde(default)]
         disable: bool,
     },
+}
+
+impl Default for ResolvableValue {
+    fn default() -> Self {
+        ResolvableValue::Resolvable {
+            name: None,
+            value: None,
+            env: None,
+            file: None,
+            json_field: None,
+            vault_path: None,
+            vault_mount: None,
+            vault_kv_version: 2,
+            default: None,
+            disable: false,
+        }
+    }
 }
 
 impl ResolvableValue {
@@ -377,6 +455,27 @@ impl ResolvableValue {
             ResolvableValue::Resolvable { name, .. } => name.clone(),
             _ => None,
         }
+    }
+
+    pub fn set_env(mut self, new_env: String) -> Self {
+        if let ResolvableValue::Resolvable { env, .. } = &mut self {
+            *env = Some(new_env);
+        }
+        self
+    }
+
+    pub fn set_json_field(mut self, new_field: String) -> Self {
+        if let ResolvableValue::Resolvable { json_field, .. } = &mut self {
+            *json_field = Some(new_field);
+        }
+        self
+    }
+
+    pub fn set_default(mut self, new_default: String) -> Self {
+        if let ResolvableValue::Resolvable { default, .. } = &mut self {
+            *default = Some(new_default);
+        }
+        self
     }
 
     fn read_file(path: PathBuf) -> anyhow::Result<String> {
@@ -392,14 +491,18 @@ impl ResolvableValue {
             ResolvableValue::Value(val) => Some(val.to_string()),
             ResolvableValue::Resolvable {
                 name,
+                value,
                 env,
                 file,
                 default,
                 json_field,
                 disable,
+                ..
             } => {
                 if *disable {
                     return None;
+                } else if value.is_some() {
+                    return value.clone();
                 }
                 let mut result = env
                     .clone()
@@ -494,14 +597,7 @@ mod tests {
     async fn resolve_env_empty() {
         const ENV: &str = "resolve_env_empty";
         std::env::remove_var(ENV);
-        let v = ResolvableValue::Resolvable {
-            env: Some(ENV.to_string()),
-            file: None,
-            name: None,
-            json_field: None,
-            default: None,
-            disable: false,
-        };
+        let v = ResolvableValue::default().set_env(ENV.to_string());
         let result = v.resolve();
         tracing::info!("Result {:?}", result);
         assert!(result.is_none());
@@ -511,14 +607,9 @@ mod tests {
     async fn resolve_env_empty_default() {
         const ENV: &str = "resolve_env_empty_default";
         std::env::remove_var(ENV);
-        let v = ResolvableValue::Resolvable {
-            env: Some(ENV.to_string()),
-            file: None,
-            name: None,
-            json_field: None,
-            default: Some("default".to_string()),
-            disable: false,
-        };
+        let v = ResolvableValue::default()
+            .set_env(ENV.to_string())
+            .set_default("default".to_string());
         let result = v.resolve();
         tracing::info!("Result {:?}", result);
         assert_eq!(result, Some("default".to_string()));
@@ -528,14 +619,7 @@ mod tests {
     async fn resolve_env_exist_empty() {
         const ENV: &str = "resolve_env_exist_empty";
         std::env::set_var(ENV, "");
-        let v = ResolvableValue::Resolvable {
-            env: Some(ENV.to_string()),
-            file: None,
-            name: None,
-            json_field: None,
-            default: None,
-            disable: false,
-        };
+        let v = ResolvableValue::default().set_env(ENV.to_string());
         let result = v.resolve();
         assert!(result.is_none());
     }
@@ -544,14 +628,9 @@ mod tests {
     async fn resolve_env_json() {
         const ENV: &str = "resolve_env_json";
         std::env::set_var(ENV, "{\"W\": 123}");
-        let v = ResolvableValue::Resolvable {
-            env: Some(ENV.to_string()),
-            file: None,
-            name: None,
-            json_field: Some("W".to_string()),
-            default: None,
-            disable: false,
-        };
+        let v = ResolvableValue::default()
+            .set_env(ENV.to_string())
+            .set_json_field("W".to_string());
         let result = v.resolve();
         assert_eq!(result, Some("123".to_string()));
     }

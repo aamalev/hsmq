@@ -13,11 +13,18 @@ secrets = [
     { env = "JWT_SECRET" }, # secret from environment variable
     { file = "secrets.txt" }, # secret from file
     { file = "secrets.json", json_field = "jwt" }, # secret from json
+    { vault_path = "p/123/5/7", vault_kv_version = 2, vault_mount = "dee" },
 ]
 
 [tracing]
 level = "INFO"
 with_ansi = true  # enable colors
+
+[vault]
+uri = "https://localhost:8200"
+auth.jwt.env = "VAULT_JWT_TOKEN"
+ca_cert = "/etc/ca.pem"
+verify = false
 
 # [sentry]
 # dsn = ""
