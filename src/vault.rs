@@ -39,6 +39,7 @@ impl Client {
         })
     }
 
+    #[allow(clippy::single_match)]
     pub async fn login(&mut self) -> anyhow::Result<()> {
         match self.cfg.auth {
             Some(config::VaultAuth::JWT { ref jwt, ref role }) => {
