@@ -38,6 +38,7 @@ tonic = "0.12.3"
 tonic-health = "0.12.3"
 tracing = "0.1.40"
 tracing-opentelemetry = "0.27.0"
+vaultrs = { version = "0.7.2", optional = true }
 tracing-subscriber = "0.3.18"
 uuid = { version = "1.8.0", features = ["v4", "v7"] }
 
@@ -52,4 +53,5 @@ tonic-build = "0.12.3"
 [features]
 console = ["dep:console-subscriber"]
 sentry = ["sentry/tokio", "dep:sentry-tracing"]
+vault = ["dep:vaultrs"]
 consul = ["dep:consulrs"]
