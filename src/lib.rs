@@ -13,6 +13,9 @@ pub mod tracing;
 pub mod utils;
 pub mod web;
 
+#[cfg(feature = "vault")]
+pub mod vault;
+
 #[cfg(feature = "consul")]
 pub mod consul;
 
