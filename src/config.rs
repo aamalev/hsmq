@@ -1,3 +1,4 @@
+use anyhow::Context;
 #[cfg(feature = "sentry")]
 use sentry::IntoDsn;
 use serde::{Deserialize, Serialize};
@@ -145,7 +146,8 @@ impl From<Sentry> for sentry::ClientOptions {
 pub enum VaultAuth {
     JWT {
         jwt: ResolvableValue,
-        role: Option<String>,
+        mount: Option<String>,
+        role: Option<ResolvableValue>,
     },
 }
 
@@ -316,6 +318,7 @@ impl RedisStreamConfig {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct Config {
+    #[serde(default)]
     pub client: Client,
     #[serde(default)]
     pub node: Node,
@@ -341,21 +344,17 @@ pub struct Config {
 
 impl Config {
     pub fn from_file(path: &Path) -> anyhow::Result<Self> {
-        match Self::load_file(path) {
-            Ok(cfg) => Ok(cfg),
-            Err(e) => {
-                log::error!("Error while load config {:?}", path);
-                Err(e)
-            }
-        }
+        Self::load_file(path).context(format!("load config from file {:?}", path))
     }
     fn load_file(path: &Path) -> anyhow::Result<Self> {
         let mut f = File::open(path)?;
+        let size = f.metadata().map(|m| m.len() as usize);
         let mut s = vec![];
+        s.try_reserve(size.unwrap_or(0))?;
         f.read_to_end(&mut s)?;
-        let s = String::from_utf8(s)?;
+        let s = String::from_utf8_lossy(&s);
         let result = toml::from_str(&s)?;
-        log::debug!("Loaded: {:?}", &result);
+        tracing::debug!("Loaded: {:?}", &result);
         Ok(result)
     }
 
