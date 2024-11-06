@@ -238,6 +238,7 @@ pub struct InMemoryQueue {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct Config {
+    #[serde(default)]
     pub client: Client,
     #[serde(default)]
     pub node: Node,
