@@ -266,11 +266,13 @@ impl Config {
     }
     fn load_file(path: &Path) -> anyhow::Result<Self> {
         let mut f = File::open(path)?;
+        let size = f.metadata().map(|m| m.len() as usize);
         let mut s = vec![];
+        s.try_reserve(size.unwrap_or(0))?;
         f.read_to_end(&mut s)?;
-        let s = String::from_utf8(s)?;
+        let s = String::from_utf8_lossy(&s);
         let result = toml::from_str(&s)?;
-        log::debug!("Loaded: {:?}", &result);
+        tracing::debug!("Loaded: {:?}", &result);
         Ok(result)
     }
 
