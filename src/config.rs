@@ -261,7 +261,7 @@ pub struct Config {
 
 impl Config {
     pub fn from_file(path: &Path) -> anyhow::Result<Self> {
-        Ok(Self::load_file(path).context(format!("load config from file {:?}", path))?)
+        Self::load_file(path).context(format!("load config from file {:?}", path))
     }
     fn load_file(path: &Path) -> anyhow::Result<Self> {
         let mut f = File::open(path)?;
