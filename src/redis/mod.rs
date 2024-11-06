@@ -2,7 +2,7 @@ pub mod errors;
 pub mod stream;
 use std::collections::HashMap;
 
-use crate::{config::RedisConfig, errors::GenericError};
+use crate::config::RedisConfig;
 use redis::IntoConnectionInfo;
 
 #[cfg(feature = "redis-cluster")]
@@ -16,7 +16,7 @@ type RedisConnection = redis::cluster_async::ClusterConnection;
 type RedisConnection = redis::aio::MultiplexedConnection;
 
 #[cfg(feature = "redis-cluster")]
-pub fn create_client(config: &RedisConfig) -> Result<Client, GenericError> {
+pub fn create_client(config: &RedisConfig) -> anyhow::Result<Client> {
     let password = config
         .password
         .clone()
@@ -74,7 +74,7 @@ impl Connectors {
         Self { m, cfg }
     }
 
-    pub async fn get_connection(&mut self, name: &str) -> Result<RedisConnection, GenericError> {
+    pub async fn get_connection(&mut self, name: &str) -> anyhow::Result<RedisConnection> {
         let c = if let Some(c) = self.m.get(name) {
             c
         } else if let Some(cfg_connector) = self.cfg.get(name) {
