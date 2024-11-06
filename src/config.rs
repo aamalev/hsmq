@@ -1,3 +1,4 @@
+use anyhow::Context;
 #[cfg(feature = "sentry")]
 use sentry::IntoDsn;
 use serde::{Deserialize, Serialize};
@@ -260,13 +261,7 @@ pub struct Config {
 
 impl Config {
     pub fn from_file(path: &Path) -> anyhow::Result<Self> {
-        match Self::load_file(path) {
-            Ok(cfg) => Ok(cfg),
-            Err(e) => {
-                log::error!("Error while load config {:?}", path);
-                Err(e)
-            }
-        }
+        Ok(Self::load_file(path).context(format!("load config from file {:?}", path))?)
     }
     fn load_file(path: &Path) -> anyhow::Result<Self> {
         let mut f = File::open(path)?;
