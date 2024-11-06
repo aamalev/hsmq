@@ -146,7 +146,8 @@ impl From<Sentry> for sentry::ClientOptions {
 pub enum VaultAuth {
     JWT {
         jwt: ResolvableValue,
-        role: Option<String>,
+        mount: Option<String>,
+        role: Option<ResolvableValue>,
     },
 }
 
