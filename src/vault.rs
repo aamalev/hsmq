@@ -4,6 +4,8 @@ use vaultrs::{auth, client::Client as _};
 
 use crate::config;
 
+const KUBERNETES: &str = "kubernetes";
+
 pub struct Client {
     cfg: config::Vault,
     client: vaultrs::client::VaultClient,
@@ -42,10 +44,22 @@ impl Client {
     #[allow(clippy::single_match)]
     pub async fn login(&mut self) -> anyhow::Result<()> {
         match self.cfg.auth {
-            Some(config::VaultAuth::JWT { ref jwt, ref role }) => {
-                let jwt = jwt.resolve().unwrap_or_default();
-                let result = auth::oidc::login(&self.client, "jwt", &jwt, role.clone()).await?;
-                self.client.set_token(&result.client_token);
+            Some(config::VaultAuth::JWT {
+                ref jwt,
+                ref role,
+                ref mount,
+            }) => {
+                let mount = mount.as_ref().map(String::as_str).unwrap_or("jwt");
+                let role = role.clone().and_then(|r| r.resolve());
+                if let Some(ref jwt) = jwt.resolve() {
+                    let result = match (mount, role) {
+                        (KUBERNETES, Some(role)) => {
+                            auth::kubernetes::login(&self.client, KUBERNETES, &role, jwt).await?
+                        }
+                        (mount, role) => auth::oidc::login(&self.client, mount, jwt, role).await?,
+                    };
+                    self.client.set_token(&result.client_token);
+                }
             }
             None => (),
         };
