@@ -362,7 +362,8 @@ impl hsmq_server::Hsmq for HsmqServer {
                         count += 1;
                     } else {
                         m_publish_err.inc();
-                        return Err(Status::not_found("Subscribers not found"));
+                        let msg = format!("Subscribers for topic {} not found", topic);
+                        return Err(Status::not_found(msg));
                     }
                 }
                 Err(err) => {
