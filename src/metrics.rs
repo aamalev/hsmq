@@ -12,4 +12,8 @@ lazy_static! {
         register_gauge_vec!("hsmq_grpc", "gRPC metrics", &["m"]).unwrap();
     pub static ref JWT_COUNTER: CounterVec =
         register_counter_vec!("hsmq_jwt_total", "JWT auth", &["name"]).unwrap();
+    pub static ref REDIS_COUNTER: CounterVec =
+        register_counter_vec!("hsmq_redis_total", "Redis events", &["name", "event"]).unwrap();
+    pub static ref REDIS_GAUGE: GaugeVec =
+        register_gauge_vec!("hsmq_redis", "Redis metrics", &["name", "m"]).unwrap();
 }

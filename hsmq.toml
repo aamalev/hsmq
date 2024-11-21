@@ -63,6 +63,50 @@ topics = [
 ]
 
 [[queues]]
+type = "RedisStream"
+name = "redis-stream"
+connector = "redis-local"
+ttl_key.h = 3
+group.name = "redis-stream"
+group.init = true
+group.clear.every = { m = 1 }
+group.clear.max_idle = { m = 3 }
+nomkstream = false
+maxlen = 999
+limit = 99
+read_limit = 14
+ack_timeout = 100
+topics = [
+    # "b.a",
+    "redis-stream",
+]
+streams = [
+    "stream:key:0",
+    "stream:key:1",
+    "stream:key:2",
+    "stream:key:3",
+    "stream:key:4",
+    "stream:key:5",
+    "stream:key:6",
+    "stream:key:7",
+    "stream:key:8",
+    "stream:key:9",
+    "stream:key:A",
+    "stream:key:B",
+    "stream:key:C",
+    "stream:key:D",
+    "stream:key:E",
+    "stream:key:F",
+]
+
+[redis.redis-local]
+nodes = [
+    "redis://localhost:7000",
+]
+# username = "a1"
+# password = {env = "REDIS_PASSWORD"}
+
+[[queues]]
 type = "InMemory"
 name = "b"
 limit = 99
