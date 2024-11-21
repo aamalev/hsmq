@@ -1310,6 +1310,7 @@ impl RedisStreamQueue {
         keys: Vec<String>,
     ) -> anyhow::Result<HashMap<String, Vec<String>>> {
         let slot_map = Self::get_cluster_slots(&mut connection).await?;
+        tracing::info!("CLUSTER SLOTS {}", serde_json::to_string(&slot_map)?);
 
         let mut key_addresses = HashMap::new();
 
