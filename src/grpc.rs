@@ -331,7 +331,8 @@ impl hsmq_server::Hsmq for HsmqServer {
             Ok(Response::new(PublishResponse { kind }))
         } else {
             GRPC_COUNTER.with_label_values(&["publish", "error"]).inc();
-            Err(Status::not_found("Subscribers not found"))
+            let msg = format!("Subscribers for topic {} not found", topic);
+            return Err(Status::not_found(msg));
         }
     }
 
