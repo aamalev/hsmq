@@ -43,7 +43,7 @@ tracing-subscriber = "0.3.18"
 uuid = { version = "1.11.0", features = ["v4", "v7"] }
 
 [dev-dependencies]
-axum-test = "16.4.0"
+axum-test = "17.0.1"
 bytes = "1.8.0"
 http-body = "1.0.1"
 
