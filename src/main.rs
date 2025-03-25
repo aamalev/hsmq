@@ -29,8 +29,6 @@ fn main() -> Result<(), GenericError> {
         .enable_all()
         .build()?
         .block_on(run(cfg, None))?;
-
-    opentelemetry::global::shutdown_tracer_provider();
     Ok(())
 }
 
