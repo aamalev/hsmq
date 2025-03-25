@@ -701,7 +701,6 @@ async fn main() -> anyhow::Result<()> {
 
     cli.run().await?;
 
-    opentelemetry::global::shutdown_tracer_provider();
     Ok(())
 }
 
