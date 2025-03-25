@@ -8,7 +8,7 @@ default-run = "hsmq"
 
 [dependencies]
 anyhow = "1.0.93"
-axum = { version = "0.7.9", features = ["ws", "http2"] }
+axum = { version = "0.8.1", features = ["ws", "http2"] }
 base64 = "0.22.1"
 clap = { version = "4.5.21", features = ["derive"] }
 console-subscriber = { version = "0.4.1", optional = true }
@@ -44,7 +44,7 @@ vaultrs = { version = "0.7.3", optional = true }
 uuid = { version = "1.11.0", features = ["v4", "v7"] }
 
 [dev-dependencies]
-axum-test = "16.4.0"
+axum-test = "17.2.0"
 bytes = "1.8.0"
 http-body = "1.0.1"
 
