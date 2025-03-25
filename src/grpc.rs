@@ -429,11 +429,13 @@ impl hsmq_server::Hsmq for HsmqServer {
         request: tonic::Request<tonic::Streaming<pb::Request>>,
     ) -> HsmqResult<Self::StreamingStream> {
         if self.task_tracker.is_closed() {
+            tracing::info!("Stream reject on shutdown"); // TODO drop
             if let Some(p) = request.metadata().get("shutdown") {
                 if p.eq("reject") {
                     return Err(Status::unavailable("shutdown"));
                 }
             }
+            return Err(Status::unavailable("shutdown")); // TODO drop
         }
 
         let redirect = request
