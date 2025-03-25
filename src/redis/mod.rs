@@ -49,10 +49,19 @@ pub fn create_client(config: &RedisConfig) -> anyhow::Result<Client> {
 }
 
 #[cfg(not(feature = "redis-cluster"))]
-pub fn create_client(config: &RedisConfig) -> Result<Client, GenericError> {
-    let password = config.password.clone().map(String::from);
+pub fn create_client(config: &RedisConfig) -> anyhow::Result<Client> {
+    let password = config
+        .password
+        .clone()
+        .map(String::from)
+        .filter(|s| !s.is_empty());
+    let username = config
+        .username
+        .clone()
+        .map(String::from)
+        .filter(|s| !s.is_empty());
     let info = config.uri.clone().into_connection_info().map(|mut i| {
-        i.redis.username.clone_from(&config.username);
+        i.redis.username.clone_from(&username);
         i.redis.password.clone_from(&password);
         i
     })?;
