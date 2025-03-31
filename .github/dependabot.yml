@@ -17,3 +17,6 @@ updates:
       tracing:
         patterns:
           - 'tracing*'
+      tonic:
+        patterns:
+          - 'tonic*'
