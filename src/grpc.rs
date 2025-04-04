@@ -42,7 +42,7 @@ impl GrpcService {
     pub async fn run(&self, hsmq: HsmqServer, auth: Arc<Auth>, listener: Option<TcpListener>) {
         let task_tracker = self.task_tracker.clone();
 
-        let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+        let (health_reporter, health_service) = tonic_health::server::health_reporter();
         health_reporter
             .set_serving::<hsmq_server::HsmqServer<HsmqServer>>()
             .await;
