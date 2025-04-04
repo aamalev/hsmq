@@ -357,7 +357,7 @@ impl RedisStreamR {
         max_idle: std::time::Duration,
         every: std::time::Duration,
     ) {
-        let sleep_start = rand::thread_rng().gen_range(0.0..every.as_secs_f64());
+        let sleep_start = rand::rng().random_range(0.0..every.as_secs_f64());
         tokio::time::sleep(std::time::Duration::from_secs_f64(sleep_start)).await;
 
         let m_pending = metrics::REDIS_GAUGE.with_label_values(&[&name, "pending"]);
@@ -388,7 +388,7 @@ impl RedisStreamR {
     }
 
     async fn bumper_ttl(mut connection: RedisConnection, name: String, ttl: std::time::Duration) {
-        let sleep_start = rand::thread_rng().gen_range(0.0..9.0);
+        let sleep_start = rand::rng().random_range(0.0..9.0);
         tokio::time::sleep(std::time::Duration::from_secs_f64(sleep_start)).await;
         loop {
             if let Err(e) = Self::bump_ttl(&mut connection, &name, &ttl).await {
