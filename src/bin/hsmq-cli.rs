@@ -432,7 +432,7 @@ impl StreaminCommand {
             }
             drop(espan);
 
-            let timeout = rand::thread_rng().gen_range(2..20);
+            let timeout = rand::rng().random_range(2..20);
             tokio::time::sleep(Duration::from_millis(timeout)).await;
         }
         Ok(counter)
