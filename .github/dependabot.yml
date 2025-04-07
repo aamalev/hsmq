@@ -14,6 +14,9 @@ updates:
         patterns:
           - axum
           - axum-test
+      sentry:
+        patterns:
+          - 'sentry*'
       tracing:
         patterns:
           - 'tracing*'
