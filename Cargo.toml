@@ -22,7 +22,7 @@ lazy_static = "1.4.0"
 log = "0.4.21"
 opentelemetry = "0.29.0"
 opentelemetry_sdk = { version = "0.29.0", features = ["rt-tokio"] }
-prometheus = { version = "0.13.3", features = ["process"] }
+prometheus = { version = "0.14.0", features = ["process"] }
 prost = "0.13.3"
 prost-types = "0.13.3"
 rand = "0.9.0"
