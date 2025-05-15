@@ -612,7 +612,7 @@ impl SubscriberRedisStream {
                 self.consumer.send_timeout(self.name.clone()).await?;
                 return Ok(());
             }
-            if self.messages.len() > 0 {
+            if !self.messages.is_empty() {
                 if let Some(msg) = self.messages.pop_front().await {
                     tracing::info!(
                         count = self.messages.len(),
@@ -1140,7 +1140,7 @@ impl RedisStreamQueue {
                     continue;
                 }
 
-                if messages.len() > 0 {
+                if !messages.is_empty() {
                     let messages = messages.clone();
                     tasks.spawn(async move {
                         if let Some(msg) = messages.pop_front().await {
