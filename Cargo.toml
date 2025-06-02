@@ -38,7 +38,7 @@ toml = "0.8.19"
 tonic = "0.13.0"
 tonic-health = "0.13.0"
 tracing = "0.1.41"
-tracing-opentelemetry = "0.30.0"
+tracing-opentelemetry = "0.31.0"
 tracing-subscriber = "0.3.19"
 vaultrs = { version = "0.7.3", optional = true }
 uuid = { version = "1.11.0", features = ["v4", "v7"] }
