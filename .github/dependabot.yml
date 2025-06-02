@@ -14,15 +14,13 @@ updates:
         patterns:
           - axum
           - axum-test
-      opentelemetry:
-        patterns:
-          - 'opentelemetry*'
       sentry:
         patterns:
           - 'sentry*'
       tracing:
         patterns:
           - 'tracing*'
+          - 'opentelemetry*'
       tonic:
         patterns:
           - tonic
