@@ -14,9 +14,6 @@ updates:
         patterns:
           - axum
           - axum-test
-      prost:
-        patterns:
-          - 'prost*'
       tracing:
         patterns:
           - 'tracing*'
@@ -24,7 +21,5 @@ updates:
           - 'sentry*'
       tonic:
         patterns:
-          - tonic
-          - tonic-build
-          - tonic-health
           - 'tonic*'
+          - 'prost*'
