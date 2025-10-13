@@ -34,7 +34,7 @@ serde_json = { version = "1.0.133", features = ["raw_value"] }
 tokio = { version = "1.41.1", features = ["macros", "rt-multi-thread", "signal", "tracing"] }
 tokio-stream = { version = "0.1.16", features = ["net"] }
 tokio-util = { version = "0.7.12", features = ["rt", "time"] }
-toml = "0.8.19"
+toml = "0.9.8"
 tonic = "0.13.0"
 tonic-health = "0.13.0"
 tracing = "0.1.41"
